@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(make:*)",
+      "Bash(cmake:*)",
+      "Bash(cargo:*)",
+      "Bash(rustc:*)",
+      "Bash(python3 harness/compare_realm.py:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git checkout -b:*)",
+      "Bash(git branch:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(xxd:*)",
+      "Bash(nm:*)",
+      "Bash(otool:*)",
+      "Read(//Users/satishbabariya/Desktop/realm-rust/**)"
+    ],
+    "deny": [
+      "Write(//Users/satishbabariya/Desktop/realm-rust/upstream/**)",
+      "Edit(//Users/satishbabariya/Desktop/realm-rust/upstream/**)",
+      "Write(//Users/satishbabariya/Desktop/realm-rust/harness/traces/**)",
+      "Edit(//Users/satishbabariya/Desktop/realm-rust/harness/traces/**)",
+      "Bash(git push:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git submodule update:*)",
+      "Write(//Users/satishbabariya/Desktop/realm-rust/.claude/BOOTSTRAP-UNLOCKED)",
+      "Edit(//Users/satishbabariya/Desktop/realm-rust/.claude/BOOTSTRAP-UNLOCKED)",
+      "Write(//Users/satishbabariya/Desktop/realm-rust/Makefile)",
+      "Edit(//Users/satishbabariya/Desktop/realm-rust/Makefile)",
+      "Write(//Users/satishbabariya/Desktop/realm-rust/harness/**)",
+      "Edit(//Users/satishbabariya/Desktop/realm-rust/harness/**)",
+      "Write(//Users/satishbabariya/Desktop/realm-rust/migration/queue.md)",
+      "Edit(//Users/satishbabariya/Desktop/realm-rust/migration/queue.md)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-baseline.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Review this session's transcript and decide whether the agent may stop.\n\nBlock stopping (return the reason as feedback) if ANY of these is true:\n\n1. The session claims a unit was ported, fixed, verified, or completed, but there is no `make verify` invocation in the transcript whose output shows it exited 0. Reading code, editing files, and a successful compile are all NOT evidence. Only the actual command output counts.\n2. `make diff-test` or `make verify` ran and FAILED, and the session is stopping without either fixing it or writing a file under migration/blocked/ that explains why it cannot be fixed.\n3. The session edited files under crates/ but never ran `make diff-test` at all.\n4. The session hit an obstacle and stopped mid-unit without leaving anything in migration/blocked/ or migration/JOURNAL.md. Silent abandonment is the one outcome that teaches the next run nothing.\n\nAllow stopping if:\n- `make verify` exited 0 in this session, OR\n- the work was purely investigative (reading, planning, no edits to crates/), OR\n- the session honestly parked a unit in migration/blocked/ with a real explanation, OR\n- `stop_hook_active` is set, meaning you have already blocked once and the agent is not making progress. Do not block twice for the same reason; let it stop and let a human look.\n\nWhen you block, say exactly which command must be run, not just that verification is missing."
+          }
+        ]
+      }
+    ]
+  }
+}

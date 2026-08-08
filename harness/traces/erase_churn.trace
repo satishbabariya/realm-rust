@@ -1,0 +1,50 @@
+# erase_churn — exercises the free-list allocator and B+-tree node merging.
+#
+# Insert-only traces never free a block, so they never test the allocator's reuse
+# path. Divergence here is usually a free-list ordering difference: functionally
+# invisible, byte-visible, and a real compatibility break because the next writer
+# reads that free list.
+
+begin
+insert 1 1 aaa 1.0 0
+insert 2 2 bbb 2.0 1
+insert 3 3 ccc 3.0 0
+insert 4 4 ddd 4.0 1
+insert 5 5 eee 5.0 0
+insert 6 6 fff 6.0 1
+insert 7 7 ggg 7.0 0
+insert 8 8 hhh 8.0 1
+commit
+
+# erase from the middle — forces node rebalancing rather than a tail truncation
+begin
+erase 4
+erase 5
+commit
+
+# refill the holes; a correct port reuses the freed blocks in the same order
+begin
+insert 4 40 dddd 40.0 0
+insert 5 50 eeee 50.0 1
+commit
+
+# erase every other row, then the rest — drains the tree to empty
+begin
+erase 1
+erase 3
+erase 5
+erase 7
+commit
+
+begin
+erase 2
+erase 4
+erase 6
+erase 8
+commit
+
+# repopulate an emptied tree: the root node may or may not be reallocated, and
+# which of those happens is a format-visible decision
+begin
+insert 100 100 zzz 100.0 1
+commit

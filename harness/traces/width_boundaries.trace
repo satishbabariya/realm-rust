@@ -1,0 +1,58 @@
+# width_boundaries — the trace this whole harness exists for.
+#
+# Realm packs integer arrays at the narrowest element width that fits the array's
+# current range: 0, 1, 2, 4, 8, 16, 32, 64 bits. Each insert below straddles one
+# of those boundaries, forcing a widening at a known point.
+#
+# A port that is behaviourally perfect but always stores 64-bit integers passes
+# every functional test and produces an incompatible file. This trace catches it.
+
+begin
+insert 1 0 z 0.0 0
+commit
+
+# width 0 -> 1 bit
+begin
+insert 2 1 z 0.0 1
+commit
+
+# 1 -> 2 bits
+begin
+insert 3 3 z 0.0 0
+commit
+
+# 2 -> 4 bits
+begin
+insert 4 15 z 0.0 1
+commit
+
+# 4 -> 8 bits
+begin
+insert 5 255 z 0.0 0
+commit
+
+# 8 -> 16 bits
+begin
+insert 6 65535 z 0.0 1
+commit
+
+# 16 -> 32 bits
+begin
+insert 7 2147483647 z 0.0 0
+commit
+
+# 32 -> 64 bits
+begin
+insert 8 2147483648 z 0.0 1
+commit
+
+# extremes, and the negative side — realm's widths are signed, so -1 and 1 do not
+# cost the same and a port that treats width as unsigned diverges here
+begin
+insert 9 9223372036854775807 z 0.0 0
+insert 10 -1 z 0.0 1
+insert 11 -128 z 0.0 0
+insert 12 -32768 z 0.0 1
+insert 13 -2147483648 z 0.0 0
+insert 14 -9223372036854775807 z 0.0 1
+commit

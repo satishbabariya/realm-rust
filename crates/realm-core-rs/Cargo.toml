@@ -1,0 +1,19 @@
+[package]
+name = "realm-core-rs"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Rust replacements for realm-core translation units, linked into the hybrid stack."
+
+[lib]
+# staticlib so the hybrid CMake target can link it ahead of the C++ archives and
+# have these definitions win. crate-type must stay staticlib: rlib alone produces
+# no linkable archive for a C++ consumer.
+crate-type = ["staticlib"]
+name = "realm_core_rs"
+
+# NOTE: [profile.*] lives in the workspace root Cargo.toml. Cargo ignores profiles in
+# member packages and only warns about it, which is exactly the kind of silently-
+# ineffective setting this project cannot afford.
+
+[dependencies]

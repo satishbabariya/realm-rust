@@ -1,0 +1,6 @@
+# smoke — the smallest trace that produces a non-trivial file.
+# If this diverges, nothing downstream is worth debugging.
+begin
+insert 1 42 hello 3.5 1
+insert 2 -7 world -0.25 0
+commit

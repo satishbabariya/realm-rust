@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/realm-core-rs"]
+
+# A root workspace so all artifacts land in ./target/, which is where
+# harness/CMakeLists.txt looks for librealm_core_rs.a. Without this, cargo would
+# put the staticlib under crates/realm-core-rs/target/ and the hybrid link would
+# silently fall back to the C++ — producing a green diff-test that proves nothing.
+
+[profile.release]
+# Layout must not depend on optimisation level, and overflow must trap rather than
+# wrap: a silently-wrapped width calculation produces a valid-looking file with the
+# wrong element width, which is the single hardest bug class here to attribute.
+overflow-checks = true
+# Unwinding across the FFI boundary into C++ is undefined behaviour.
+panic = "abort"

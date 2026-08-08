@@ -1,0 +1,52 @@
+# many_commits — many small transactions rather than one large one.
+#
+# Each commit writes a new top ref and flips bit 0 of the header flags, so this
+# trace exercises the alternating-header protocol and the version history that
+# insert-heavy single-commit traces never touch. It is also the trace most likely
+# to expose accidental non-determinism (timestamps, addresses, thread ids leaking
+# into the file), which is why determinism-check leans on it.
+
+begin
+insert 1 1 r1 1.5 1
+commit
+begin
+insert 2 2 r2 2.5 0
+commit
+begin
+insert 3 3 r3 3.5 1
+commit
+begin
+insert 4 4 r4 4.5 0
+commit
+begin
+insert 5 5 r5 5.5 1
+commit
+begin
+insert 6 6 r6 6.5 0
+commit
+begin
+insert 7 7 r7 7.5 1
+commit
+begin
+insert 8 8 r8 8.5 0
+commit
+begin
+insert 9 9 r9 9.5 1
+commit
+begin
+insert 10 10 r10 10.5 0
+commit
+
+# an empty write transaction still advances the version — a port that elides it
+# produces a file with a different version chain
+begin
+commit
+begin
+commit
+
+begin
+erase 1
+commit
+begin
+insert 11 11 r11 11.5 1
+commit

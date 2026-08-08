@@ -1,0 +1,45 @@
+# string_widths — strings cross a different set of layout boundaries than ints.
+#
+# Short strings live inline in a fixed-width array whose width is the longest
+# string present, rounded up. Past a threshold the column switches to a long-string
+# representation (blob + index). Growing the longest string one byte at a time
+# walks the whole ladder and forces the switch.
+
+begin
+insert 1 0 a 0.0 0
+commit
+
+begin
+insert 2 0 ab 0.0 0
+insert 3 0 abc 0.0 0
+insert 4 0 abcd 0.0 0
+commit
+
+begin
+insert 5 0 abcdefgh 0.0 0
+insert 6 0 abcdefghijklmnop 0.0 0
+commit
+
+# 31/32/33 bytes — the classic inline/spill boundary
+begin
+insert 7 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0.0 0
+insert 8 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0.0 0
+insert 9 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0.0 0
+commit
+
+# well past any inline representation
+begin
+insert 10 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0.0 0
+commit
+
+# empty string is not the same as a zero-width column; both must round-trip
+begin
+insert 11 0 "" 0.0 0
+commit
+
+# non-ASCII: UTF-8 byte length differs from character count, and a port that
+# counts characters produces a correctly-readable but differently-laid-out column
+begin
+insert 12 0 héllo 0.0 0
+insert 13 0 日本語テキスト 0.0 0
+commit
