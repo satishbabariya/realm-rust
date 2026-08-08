@@ -16,3 +16,4 @@
 # g_base64_encoding_chars; migration/checks/run_base64_differential.sh checks this.
 
 util/base64.cpp
+disable_sync_to_disk.cpp

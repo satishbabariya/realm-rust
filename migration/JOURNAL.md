@@ -232,3 +232,90 @@ mismatch and the unextracted archive member. All three had the same shape: the
 - Anything returning an STL container by value is a real ABI port, not a signature
   translation. Budget for it: `std::vector`'s layout, its allocator, its growth
   policy, and the empty-vector special case were four separate decisions here.
+
+---
+
+## 2026-08-08 — bootstrap report, `util/misc_ext_errors.cpp` parked, `disable_sync_to_disk.cpp` ported
+
+Two units' worth of queue, one unit ported. About 40 minutes, most of it spent on the
+finding below rather than on any Rust.
+
+### The queue orders by portability; the gate rewards observability
+
+`gen_queue.py` sorts leaves-first by dependency depth and size. Both are good proxies
+for *how hard a unit is to port*. Neither says anything about *whether porting it can
+be checked*, and under a byte-identity gate that is the property that decides whether a
+green result carries information.
+
+Queue #1, `util/misc_ext_errors.cpp`, turns out to be dead code here: all 33 consumers
+are under `sync/`, and sync is OFF. It compiles into the `Storage` archive and the
+linker never extracts it —
+
+```
+$ nm build/oracle/trace_runner | grep -i MiscExt
+(no output)
+```
+
+— so `make diff-test` would go green for *any* implementation, including an empty one.
+Parked, with the full analysis in `migration/blocked/util-misc_ext_errors.md`.
+
+**Seven of the thirteen depth-0 units are dead this way** (#1, #3, #4, #5, #6, #7, #9).
+The cheap test is: take the unit's `.o`, list its defined symbols, and intersect with
+`nm` of the linked binary. Empty intersection means the gate is blind to that unit.
+
+That link-level test beats grepping for consumers, which I tried first and which gets
+`util/bson/regular_expression.cpp` wrong: it has 20 consumers outside `sync/`, all in
+`bson`, which is itself unreachable with `REALM_APP_SERVICES=OFF`. Transitive deadness
+is only visible at the link.
+
+### `disable_sync_to_disk.cpp` — live, but still byte-invisible
+
+Ported instead, as the first genuinely reachable unporte unit (2/2 symbols linked).
+Two functions over one `std::atomic<bool>`.
+
+Format decisions: **none**. Nothing in this unit reaches the file. All five call sites
+(`db.cpp:1680`, `alloc_slab.cpp:{839,1509,1532}`, `group_writer.cpp:1402`) use the flag
+only to decide whether to *flush*. So this unit is executed — unlike `misc_ext_errors`
+— but a wrong return value would still produce a byte-identical `.realm`.
+
+Worth being precise about the distinction, because the two failure modes need different
+mitigations: `misc_ext_errors` is **unreachable** (no test can ever reach it while sync
+is off), `disable_sync_to_disk` is **reachable but byte-invisible** (executed on every
+trace, but its effect is on `fsync` timing, not content).
+
+The one thing the gate *did* prove: link-order replacement still works with two units
+in the crate. The C++ TU's anonymous-namespace global is present in the oracle and
+absent from the hybrid, where only the Rust static appears:
+
+```
+oracle: __ZN12_GLOBAL__N_122g_disable_sync_to_diskE.0
+hybrid: __RNvNtCs…_13realm_core_rs20disable_sync_to_disk22G_DISABLE_SYNC_TO_DISK.0
+```
+
+### Assumptions
+
+- **Memory ordering mirrored, not optimised.** C++ `g = disable` and `return g` on a
+  `std::atomic<bool>` are `store`/`load` with `memory_order_seq_cst`, so the Rust uses
+  `Ordering::SeqCst`. `Relaxed` would behave identically on every platform realm
+  targets and would be the idiomatic choice; mirroring the C++ is the rule, and this is
+  a cheap place to honour it rather than a place to start making exceptions.
+- **No `migration/checks/` differential for this unit**, deviating from last session's
+  "if it cannot reach a `.realm`, write the differential first". The advice is right for
+  something like base64 — 582 lines, alphabet edge cases, padding rules. Here the entire
+  observable contract is two atomic operations on one bool, and the Rust unit tests
+  cover it exhaustively (default false, round-trip both ways, store-not-latch). A
+  208-line differential harness to compare a bool getter against a bool getter would be
+  ceremony, not evidence. Flagging the deviation rather than quietly skipping it.
+
+### For the next unit
+
+- **Run the reachability check before reading the C++.** One `nm` intersection, and it
+  reorders the whole queue. Doing it first would have saved this session's detour.
+- The first live, byte-*visible* units are `string_data.cpp` (#12, inbound 14) and
+  `error_codes.cpp` (#13). `string_data` is where element width starts to matter and is
+  the first unit where `make diff-test` becomes a real test rather than a regression
+  check. `backtrace.cpp` (#10) and `basic_system_errors.cpp` (#8) are live but, like
+  this unit, likely byte-invisible.
+- Recommended: give `gen_queue.py` a reachability column and sort dead units to the
+  back. Without it the loop parks #1, #3, #4 and halts on its three-consecutive-parks
+  rule — the right behaviour for the wrong reason, three iterations late.
