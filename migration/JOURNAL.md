@@ -319,3 +319,79 @@ hybrid: __RNvNtCs…_13realm_core_rs20disable_sync_to_disk22G_DISABLE_SYNC_TO_DI
 - Recommended: give `gen_queue.py` a reachability column and sort dead units to the
   back. Without it the loop parks #1, #3, #4 and halts on its three-consecutive-parks
   rule — the right behaviour for the wrong reason, three iterations late.
+
+---
+
+## 2026-08-08 — `string_data.cpp` ported; the first unit the gate could have caught
+
+The first port where a mistake would have written wrong bytes into a `.realm`, and the
+first where the trace gate still would not have noticed.
+
+### Why the differential was mandatory here
+
+`murmur2_or_cityhash` supplies string-index keys, so a one-bit hash divergence changes
+index bytes on disk. But no trace in `harness/traces/` builds a string index, so
+`make diff-test` never evaluates these five functions. Green from `make verify` means
+"nothing else broke", not "the hashes are right".
+
+`migration/checks/run_string_data_differential.sh` is the real evidence: one driver
+compiled twice, once against `string_data.cpp.o` and once against the Rust staticlib,
+dumps compared byte-for-byte. **335 probe lines, all identical.** The corpus is
+exhaustive over lengths 0..130 — which straddles every cityhash branch boundary
+(`0`, `1..3`, `4..8`, `9..16`, `17..32`, `33..64`, `>64`) and murmur2's 3/2/1-byte tail
+fallthrough — plus long inputs through the 64-byte loop and all-`0xff`/`0x00`/`0x80`
+buffers to catch a stray sign extension.
+
+### Format decisions found
+
+- **`load4`/`load8` are `memcpy`, hence native-endian and unaligned.** Ported as
+  `from_ne_bytes` over `copy_nonoverlapping`, not `from_le_bytes`. They agree on every
+  target realm ships, but `ne` keeps the Rust wrong in the same way the C++ would be if
+  that ever stopped being true.
+- **Intermediate truncation width is load-bearing.** In `hash_len_0_to_16`, `a << 3` is
+  evaluated on a `uint_least32_t` and only then widened to 64 bits, so bits above 31 are
+  discarded. Computing it in `u64` — the obvious "cleaner" reading — changes the hash for
+  every input of 4..=8 bytes. This is the single most likely way to get this unit subtly
+  wrong, and it is invisible without a differential.
+- **`rotate_by_at_least_1` is a right-rotate that is UB at shift 0** (`val << 64`).
+  `rotate()` exists only to guard it. Every call site passes a non-zero constant, so the
+  guard never fires; both are reproduced so the shape stays recognisable.
+- **`pattern.size() - 1` underflows to `SIZE_MAX` for an empty pattern** in `matchlike`.
+  `wrapping_sub` preserves it; `len() - 1` would panic in debug instead. The C++ is safe
+  only because `p2 == 0` never equals `SIZE_MAX`.
+
+### Surprises
+
+- `matchlike`/`matchlike_ins` are **private** statics, reachable in-tree only via
+  `StringData::like()` and `unicode.cpp`'s `string_like_ins`. The driver binds the
+  mangled symbols with asm labels instead, which also removes any dependence on an
+  inline wrapper surviving optimisation. On Darwin an asm label is used verbatim, so the
+  leading underscore has to be written by hand — `__ZN5realm...`, two underscores.
+- `string_data.cpp` inlines everything into its five exports, so it has **no file-static
+  table to fingerprint** the way `base64.cpp` does with `g_base64_encoding_chars`. The
+  differential guards linkage by asserting the crate probe is present in the Rust driver
+  and absent from the C++ one instead.
+- `unicode.cpp:324` calls `matchlike_ins(text, lower, upper)` while the parameters are
+  named `(text, pattern_upper, pattern_lower)`. Argument names disagree with the call.
+  Not this unit's problem — the port mirrors the signature — but worth knowing before
+  porting `unicode.cpp`.
+
+### Queue
+
+Ported out of strict queue order: #8 `util/basic_system_errors.cpp` and #10
+`util/backtrace.cpp` are live but both need ABI machinery that should be built
+deliberately rather than mid-tick — `basic_system_errors` needs a libc++
+`std::error_category` subclass synthesized from Rust (9-slot vtable, `__si_class_type_info`
+RTTI, `std::string` returned by value), which is also what `error_codes.cpp` (#13) and the
+parked `misc_ext_errors.cpp` need. One shim, three units; worth doing once, on purpose.
+
+### For the next unit
+
+- The reachability check (unit `.o` symbols ∩ linked binary) now has a companion
+  question: *reachable, but does it reach the file?* Three categories so far —
+  unreachable (`misc_ext_errors`, `random`), reachable-but-byte-invisible
+  (`disable_sync_to_disk`), and reachable-and-byte-visible-but-untraced (`string_data`).
+  Only the third kind justifies a differential, and it is the kind worth prioritising.
+- If a trace ever adds a string index, `string_data` moves into the gate's reach and the
+  differential becomes a redundancy rather than the sole evidence. That is the argument
+  for extending the trace schema before porting `index_string.cpp` (#50).

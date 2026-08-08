@@ -20,6 +20,7 @@
 #![deny(improper_ctypes_definitions)]
 
 pub mod disable_sync_to_disk;
+pub mod string_data;
 pub mod util;
 
 /// Presence probe for the hybrid build.
@@ -34,7 +35,7 @@ pub mod util;
 /// enforces that, so the two cannot drift.
 #[no_mangle]
 pub extern "C" fn realm_rs_units_ported() -> u32 {
-    2
+    3
 }
 
 #[cfg(test)]
