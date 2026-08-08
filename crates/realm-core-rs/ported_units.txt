@@ -1,0 +1,18 @@
+# Translation units under upstream/src/realm/ that this crate serves in the hybrid
+# stack. One line per unit; blank lines and #-comments are ignored.
+#
+# This is a manifest, not a build input — nothing in harness/ reads it, and it must
+# not be mistaken for the mechanism that keeps the C++ out of the link. That
+# mechanism is link order plus codegen-units = 1; see [profile.release] in the
+# workspace Cargo.toml.
+#
+# What the file is for: src/lib.rs asserts that realm_rs_units_ported() equals the
+# number of entries here, so the probe the harness greps for cannot silently drift
+# away from what has actually been replaced.
+#
+# Verify a unit is genuinely served from Rust with:
+#   nm build/hybrid/trace_runner | grep <a static symbol unique to the C++ TU>
+# and expect no match. For util/base64.cpp the markers are g_base64_chars and
+# g_base64_encoding_chars; migration/checks/run_base64_differential.sh checks this.
+
+util/base64.cpp

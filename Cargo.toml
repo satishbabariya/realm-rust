@@ -14,3 +14,21 @@ members = ["crates/realm-core-rs"]
 overflow-checks = true
 # Unwinding across the FFI boundary into C++ is undefined behaviour.
 panic = "abort"
+# One object file for the whole crate, and the reason is linkage, not code size.
+#
+# The hybrid link line is:
+#   trace_runner.o  librealm-ffi-static.a  librealm_core_rs.a  ...  librealm.a
+# and the C++ TUs we replace live in librealm.a, at the end. ld extracts an archive
+# member only to resolve a symbol that is still undefined, so the Rust definition
+# wins *only if* its object has already been pulled in by the time librealm.a is
+# scanned. What pulls a Rust object in is trace_runner's reference to
+# realm_rs_units_ported().
+#
+# With multiple codegen units that reference reaches only the CGU holding the probe.
+# A ported unit that landed in a different CGU would never be extracted, librealm.a
+# would happily supply the original C++, and everything downstream would look
+# exactly like a successful port — the probe still present, the link still clean,
+# diff-test still green. codegen-units = 1 collapses that to a single object, so
+# "the probe is in the binary" and "every ported unit is in the binary" become the
+# same statement, which is what `make hybrid`'s existing nm check already tests.
+codegen-units = 1

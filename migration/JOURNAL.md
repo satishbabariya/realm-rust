@@ -84,3 +84,151 @@ double, bool). No collections, links, Mixed, or Decimal128. Also, `realm_compact
 runs before every close, so no trace compares an uncompacted file — a free-list bug
 that compaction erases would slip through. Both need new traces before any unit
 touching them is ported.
+
+---
+
+## 2026-08-08 — unit 1: `util/base64.cpp`
+
+`make verify` exits 0. `migration/checks/run_base64_differential.sh` exits 0 on
+15,293 probe lines. ~2 hours.
+
+**This unit cannot be judged by `make diff-test`, and that is the main thing to carry
+forward.** base64 never reaches a `.realm`: every call site (`to_json.cpp`,
+`uuid.cpp`, `util/serializer.cpp`, `util/bson/bson.cpp`, plus the disabled sync/app
+code) consumes the result as text. A correct port and a wrong one produce identical
+files, so diff-test would have gone green over an arbitrarily broken implementation.
+The gate still had to pass — it proves the link is intact and nothing else moved —
+but it is not the evidence.
+
+The evidence is `migration/checks/`: one driver compiled twice, once against
+`build/oracle/.../base64.cpp.o` and once against `librealm_core_rs.a`, dumps compared
+byte for byte. **It caught a real bug on the first run** (below). Expect more units
+like this — anything under `util/` that only produces strings needs its own
+differential, and "diff-test is green" should not be written in this file as if it
+settled the question.
+
+### The bug the differential caught
+
+`base64_decode_to_vector` ends with `decoded.resize(*actual_size)`, which reads as a
+pure shrink. It is not. `base64_decode` can report **one byte more** than
+`base64_decoded_size()` reserved, and then `resize` grows and reallocates.
+
+The trigger: `4k` valid characters followed by exactly one `=`, no whitespace. The
+four-character groups emit `3k` bytes; the lone `=` sends the tail through the
+`num_trailing_equals == 1` branch, which emits two more; `3k + 2` against a
+reservation of `(3(4k+1)+3)/4 = 3k + 1`. `"="`, `"AAAA="`, `"AAAAAAAA="` … all hit
+it. Every other mix of valid characters, padding and whitespace fits, because
+whitespace only inflates the input length and therefore the reservation. So the
+overrun is exactly one byte, and it is a one-byte heap overflow in upstream's
+Release build — the `REALM_ASSERT_EX` that would have caught it is compiled out.
+
+My first version assumed shrink-only and returned a vector with `end` one past `cap`.
+The differential reported `cap=2` vs `cap=1` on the very first run. Nothing else
+would have found it: the *contents* were identical, because C++'s reallocating grow
+copies only the old `size` bytes and value-initialises the tail, so the byte that
+overran is discarded and the last byte is `0` in both stacks.
+
+Mirroring `libc++`'s `__recommend()` was then required, and `max(2*cap, new_size)` is
+not the whole function — there is a `max_size()` clamp above `PTRDIFF_MAX/2`.
+
+### Format / ABI decisions found (verified against the built oracle object)
+
+None of these are on-disk layout — this unit has none — but they are the C++ ABI
+facts the next `util/` unit will need, and they were read off
+`build/oracle/.../base64.cpp.o`, not assumed:
+
+| C++ type | layout | passing |
+|---|---|---|
+| `Span<T, dynamic_extent>` | `{T* data; size_t size}`, 16 B | 2 GPRs, trivially copyable |
+| `std::optional<size_t>` | value @0, `bool` @8, 16 B | returned in `rax`:`dl` |
+| `std::vector<char>` (libc++) | `{begin, end, cap}`, 24 B, no SBO | — |
+| `std::optional<std::vector<char>>` | vector @0, `bool` @24, 32 B | **sret** in `rdi` |
+
+Read straight off the disassembly: `base64_decode`'s `none` path is
+`xorl %eax,%eax; xorl %edx,%edx`, its engaged path ends `movb $0x1,%dl`.
+`base64_decode_to_vector` takes the sret pointer in `rdi` with the Span in `rsi:rdx`.
+
+Two more that will recur:
+
+- **Buffers handed to C++ must come from `operator new`.** `base64.cpp.o` imports
+  `_Znwm` and the *unsized* `_ZdlPv`; the returned vector is destroyed by C++, so a
+  Rust-allocator buffer would be freed by the wrong allocator. Declared as
+  `extern` `_Znwm`/`_ZdlPv` rather than using `std::alloc`.
+- **An empty `std::vector<char>` is three null pointers, not a zero-size
+  allocation.** `vector<char> v(0)` allocates nothing. Returning a heap pointer for
+  the empty case diverges on `capacity()` and hands C++ a block it never asked for.
+
+### Assumptions and deliberate deviations
+
+- **One deliberate deviation from the C++:** the decode buffer is allocated with one
+  spare byte (`DECODE_OVERRUN_SLACK`) so the mirrored one-byte overrun stays inside
+  its own allocation. Capacity is still reported as `max_size`, so nothing observable
+  changes — proven by the differential, which compares size, capacity, contents and a
+  checksum. The "mirror the C++ even where it looks wrong" rule exists to protect
+  on-disk layout; no byte here reaches a file, so honouring it literally would have
+  meant shipping a new heap overflow for nothing. Recorded here because it is the
+  first time that rule has been knowingly bent.
+- `REALM_ASSERT`/`REALM_ASSERT_EX` are no-ops in this build (`REALM_ENABLE_ASSERTIONS`
+  off, `REALM_DEBUG` undefined) — confirmed by the absence of an undefined
+  `realm::util::terminate` in the object. Mirrored as `debug_assert!`, which is
+  likewise absent from the `--release` staticlib. **This means release arithmetic can
+  overflow exactly as the C++ does**, so the size helpers use `wrapping_*`. Note the
+  workspace sets `overflow-checks = true` in `[profile.release]`, so a plain `+` there
+  would have panicked instead of wrapping.
+- `panic = "abort"` in the workspace profile means a `std::bad_alloc` thrown by
+  `operator new` inside `base64_decode_to_vector` aborts rather than propagating to
+  the C++ caller, which the C++ (not `noexcept`) would allow. The function is declared
+  `extern "C-unwind"` so the intent is recorded in the signature, but under
+  `panic=abort` the behaviour differs from upstream under OOM only. Left as-is rather
+  than changing a deliberate workspace-wide safety setting for one unit.
+- Two decode-table quirks preserved on purpose, both of which change which inputs are
+  accepted: **carriage return (0x0D) is invalid, not whitespace** — only tab, LF and
+  space are skipped — and the table silently accepts the URL-safe alphabet (`-` → 62,
+  `_` → 63). Transcribed verbatim and covered by unit tests so a later "cleanup"
+  fails loudly.
+- The `extra = input.size() % 4` fallback counts *all* input characters including
+  whitespace and `=`, not just the valid ones. Mirrored as-is; the differential feeds
+  whitespace-injected inputs specifically to pin this down.
+
+### How the hybrid actually excludes the C++ — not what the CMake comment says
+
+`harness/CMakeLists.txt` claims the replaced C++ TUs "are excluded in that crate's
+build.rs". There is no build.rs and there could not be: cargo cannot reach into the
+CMake target. **No build-system change was needed, and none is possible** —
+`harness/**` and the `Makefile` are permission-denied, by design.
+
+What actually happens is link order. The hybrid link line is
+
+```
+trace_runner.o  librealm-ffi-static.a  librealm_core_rs.a  …  librealm.a
+```
+
+`base64.cpp.o` lives in `librealm.a`, at the end. `ld` extracts an archive member
+only to resolve a still-undefined symbol, so once the Rust object has defined
+`base64_encode` the C++ member is never pulled. Confirmed: `nm build/hybrid/trace_runner`
+has no `g_base64_chars` / `g_base64_encoding_chars`, and the three symbols sit at the
+Rust object's offsets.
+
+What pulls the Rust object in is `trace_runner`'s reference to
+`realm_rs_units_ported()`. **That only covers the codegen unit holding the probe.** A
+ported unit that landed in a different CGU would never be extracted, `librealm.a`
+would supply the original C++, and every outward sign would still look like success —
+probe present, link clean, diff-test green. Added `codegen-units = 1` to
+`[profile.release]` for exactly this reason: it collapses the crate to one object, so
+"the probe is linked" and "every ported unit is linked" become the same statement, and
+`make hybrid`'s existing `nm` check already tests it.
+
+This is the third silent-green failure mode found in this repo, after the Rosetta arch
+mismatch and the unextracted archive member. All three had the same shape: the
+*absence* of the Rust was indistinguishable from its presence.
+
+### For the next unit
+
+- Check first whether the unit's output can reach a `.realm`. If it cannot, write the
+  differential before writing the Rust — it is where the bugs will be found.
+- Get the ABI from the built object (`nm`, `objdump -d`), not from reasoning about
+  the Itanium ABI. Ten minutes with `objdump` settled the `optional<size_t>` register
+  return that would otherwise have been a guess.
+- Anything returning an STL container by value is a real ABI port, not a signature
+  translation. Budget for it: `std::vector`'s layout, its allocator, its growth
+  policy, and the empty-vector special case were four separate decisions here.

@@ -4,17 +4,22 @@
 //! the original C++, and `make diff-test` compares the `.realm` files the two stacks
 //! produce. Byte-identity is the acceptance criterion — see CLAUDE.md.
 //!
-//! Nothing has been ported yet. That is why the hybrid is currently byte-identical
-//! to the oracle by construction, and why a green `make diff-test` right now proves
-//! the harness works rather than that any Rust is correct.
+//! The C++ translation units these definitions replace are listed in
+//! `ported_units.txt` next to this crate's manifest, and `harness/CMakeLists.txt`
+//! removes exactly those from the hybrid's `Storage` target. Adding a unit here
+//! without adding it there leaves the C++ definition in the link and the Rust
+//! unreferenced — which looks identical to a successful port from the outside.
 //!
 //! When adding a unit:
-//!   - `#[no_mangle] pub extern "C"` with the exact symbol the hybrid link needs
+//!   - `#[export_name = "<exact mangled symbol>"]` on a `pub extern "C"` fn
 //!   - `#[repr(C)]` on anything crossing the boundary or reaching the file
 //!   - mirror the C++ width/alignment arithmetic rather than re-deriving it
 //!     (see .claude/rules/format-fidelity.md)
+//!   - add the unit to `ported_units.txt`
 
 #![deny(improper_ctypes_definitions)]
+
+pub mod util;
 
 /// Presence probe for the hybrid build.
 ///
@@ -22,9 +27,13 @@
 /// liable to be dropped entirely by the linker, which would make "the Rust is linked"
 /// and "the Rust is absent" indistinguishable — exactly the ambiguity this project
 /// cannot afford.
+///
+/// The count is the number of translation units served from Rust. It must equal the
+/// number of entries in `ported_units.txt`; `tests::probe_matches_the_manifest`
+/// enforces that, so the two cannot drift.
 #[no_mangle]
 pub extern "C" fn realm_rs_units_ported() -> u32 {
-    0
+    1
 }
 
 #[cfg(test)]
@@ -32,7 +41,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn probe_reports_zero_until_a_unit_lands() {
-        assert_eq!(realm_rs_units_ported(), 0);
+    fn probe_matches_the_manifest() {
+        let manifest = include_str!("../ported_units.txt");
+        let units = manifest
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .count();
+        assert_eq!(
+            realm_rs_units_ported() as usize,
+            units,
+            "the probe and ported_units.txt disagree about how much C++ has been replaced"
+        );
     }
 }
