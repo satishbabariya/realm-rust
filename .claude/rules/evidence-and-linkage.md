@@ -1,0 +1,108 @@
+---
+description: What counts as evidence that a unit is ported, and how to prove the Rust actually replaced the C++. Derived from repeated findings across the first four porting sessions.
+paths:
+  - "crates/**/*.rs"
+  - "migration/**"
+---
+
+# Evidence and linkage
+
+`format-fidelity.md` covers how to get the bytes right. This file covers the prior
+question: whether any check in this repo can tell that you did.
+
+Every failure mode found in this repo so far has been a **false green**, never a false
+red. Design your checks assuming that is the default.
+
+## Classify the unit's observability before you read its C++
+
+Do this first, before opening the source. It costs one command and it has reordered the
+queue twice.
+
+```
+nm -g build/oracle/CMakeFiles/Storage.dir/<unit>.cpp.o | grep -v ' U '   # defined
+nm build/oracle/trace_runner                                             # linked
+```
+
+Intersect them. Four categories, and they need different evidence:
+
+| Category | Test | Example | What `make diff-test` proves |
+|---|---|---|---|
+| **Unreachable** | 0 symbols survive into the linked binary | `util/misc_ext_errors`, `util/random`, 5 more | nothing — it passes for an empty file |
+| **Reachable, byte-invisible** | symbols linked, but output never reaches a `.realm` | `disable_sync_to_disk`, `util/base64` | the link is intact, nothing more |
+| **Byte-visible, untraced** | could write file bytes, but no trace exercises that path | `string_data` (no trace builds a string index) | only that nothing else regressed |
+| **Byte-visible and traced** | a wrong byte fails a trace | none yet | this is the real gate |
+
+Rules that follow:
+
+- **Unreachable → park it.** Do not port it. A green `make verify` on a unit the linker
+  never pulls is not weak evidence, it is no evidence, and committing it records
+  progress nothing can substantiate.
+- **Source grep is not the test; the link is.** `util/bson/regular_expression.cpp` has
+  20 consumers outside `sync/`, all in `bson`, which is itself dead with
+  `REALM_APP_SERVICES=OFF`. Grep called it live. The link did not. Transitive deadness
+  is only visible at the link.
+- **Byte-visible-but-untraced → the differential in `migration/checks/` is the
+  evidence**, and `make verify` is the regression check. Write the differential
+  *before* the Rust; that is where the bug will be. Two templates exist:
+  `run_base64_differential.sh` and `run_string_data_differential.sh`. Both caught, or
+  were built to catch, things nothing else could see.
+- **Reachable-but-byte-invisible and small → unit tests are enough.** The
+  "always write a differential" advice does not scale down. A 208-line harness
+  comparing a bool getter against a bool getter is ceremony, not evidence
+  (`disable_sync_to_disk`). Say in the journal that you skipped it and why.
+
+## Prove the Rust actually replaced the C++
+
+Three separate silent-green failures have had the same shape: **the absence of the Rust
+was indistinguishable from its presence.**
+
+1. Rosetta x86_64 shell vs native arm64 rustc — `ld` dropped the staticlib with a
+   warning and exited 0. The hybrid was pure C++ and diff-test was green.
+2. `ld` extracts an archive member only to resolve an undefined symbol. Nothing
+   referenced the crate, so it was never extracted.
+3. With multiple codegen units, only the CGU containing the probe symbol gets
+   extracted. A ported unit in another CGU is silently supplied by `librealm.a`
+   instead. `codegen-units = 1` in `[profile.release]` exists for this and must stay —
+   it is what makes "the probe is linked" and "every ported unit is linked" the same
+   statement.
+
+So after every port, check both directions on the hybrid binary:
+
+- the C++ TU's private symbols (a file-static table, an anonymous-namespace global) are
+  **absent**, and
+- the Rust symbols are **present** at the expected offsets.
+
+If the unit has no file-static to fingerprint (`string_data.cpp` inlines everything
+into its exports), assert instead that the crate probe is present in the Rust-linked
+driver and absent from the C++ one.
+
+The hybrid excludes C++ purely by **link order** — `librealm_core_rs.a` precedes
+`librealm.a` on the link line. There is no build-system change to make, and none is
+possible: `harness/**` and the `Makefile` are permission-denied by design. The comment
+in `harness/CMakeLists.txt` about a `build.rs` is wrong; there is no `build.rs`.
+
+## Get the ABI off the built object, not out of your head
+
+Ten minutes with `objdump -d` has twice settled something that would otherwise have
+been a guess (`std::optional<size_t>` returned in `rax:dl`; `optional<vector<char>>`
+returned via `sret` in `rdi`). The layout table lives in `JOURNAL.md` under the base64
+entry.
+
+Two traps confirmed on this machine:
+
+- **Buffers handed back to C++ must come from `operator new`** (`_Znwm` / unsized
+  `_ZdlPv`, declared `extern`). C++ destroys them; a Rust-allocator block would be
+  freed by the wrong allocator. And an empty `std::vector<char>` is three null
+  pointers, not a zero-size allocation.
+- **On Darwin an `asm` label is used verbatim**, so binding a private mangled C++
+  symbol needs the leading underscore written by hand: `__ZN5realm…`, two underscores.
+  This is how `matchlike`/`matchlike_ins` were reached without depending on an inline
+  wrapper surviving optimisation.
+
+## Assertions and overflow
+
+`REALM_ASSERT`/`REALM_ASSERT_EX` are no-ops in this build — confirmed by the absence of
+an undefined `realm::util::terminate` in the objects. So **release arithmetic can
+overflow exactly as the C++ does**, and the workspace sets `overflow-checks = true`,
+which would panic where the C++ wraps. Use `wrapping_*` wherever you are mirroring
+arithmetic that upstream lets overflow, and say so in a comment.

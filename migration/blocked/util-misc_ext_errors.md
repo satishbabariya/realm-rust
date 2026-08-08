@@ -105,3 +105,18 @@ correct behaviour, right diagnosis, but it would burn three iterations to reach 
 conclusion already established here. Recommended fix: teach `gen_queue.py` to emit a
 reachability column and sort dead units to the back. That is a change to the planning
 artifact, not to a gate, so it does not weaken anything.
+
+## Audit 2026-08-08 (reflection #1)
+
+Still blocked. Nothing ported since (`base64`, `disable_sync_to_disk`, `string_data`)
+changes reachability — the blocker is that the linker never pulls this object, and no
+port can alter that while `REALM_ENABLE_SYNC=OFF`.
+
+One thing did change, and it is worth flagging for whoever picks this up: the
+`std::error_category` machinery this unit needs is **also** needed by two units that
+*are* live — `util/basic_system_errors.cpp` (#8, 2/5 symbols linked) and
+`error_codes.cpp` (#13, 7/17 linked). Once that shim is built for either of them, the
+"expensive to port" half of this entry's argument no longer applies.
+
+That does not unpark it. Cost was never the reason. Unreachability is, and it is
+unchanged.
