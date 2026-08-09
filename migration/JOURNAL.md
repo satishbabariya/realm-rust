@@ -2986,3 +2986,93 @@ dead-payload, 6 vtable/RTTI, 4 exception-shim, with overlap.
 | exception *catching* | 1 unit | — | `util/backtrace` only; needs real C++ in the hybrid |
 
 Nothing further can land from the front of the queue without one of them.
+
+---
+
+## 2026-08-09 — `util/to_string.cpp` parked on a new screening step; and a correction: the queue is **not** exhausted
+
+Loop restarted by the human at 60-minute cadence after the previous three-park stop.
+This tick parked `uuid` #24, `util/platform_info` #26 and `util/to_string` #27 — three
+consecutive again, so the same condition has fired and the loop is stopped. Job
+`c9cb1d70` cancelled.
+
+But the tick also produced a new screening step and a correction to what I told the
+human at the last stop, and those matter more than the parks.
+
+### New step 8: `nm -u $OBJ | grep '^VTT for'`
+
+`util/to_string` **passes every step of the screen** — reachable 7/7, zero `ZT*`
+defined, zero `throw`/`catch`/`try`, every EH site owned by a libc++ weak helper — and
+it is not portable. It constructs `std::ostringstream` and `std::stringstream` locals.
+
+A **VTT** (virtual table table) exists only for classes with **virtual bases**, and
+iostreams has them (`basic_istream`/`basic_ostream` both virtually inherit `basic_ios`).
+Constructing such an object is not "call the constructor": it is participating in C++'s
+virtual-base construction protocol, where the constructor consumes a VTT and initialises
+several vtable pointers plus a virtual-base offset table in order. That is reimplementing
+a compiler feature, not bridging an ABI.
+
+Tested in both directions across 15 units before proposing:
+
+| VTT count | units | result |
+|---|---|---|
+| 0 | all **10 ported** units, plus `util/compression`, `uuid`, `table_ref` | no false positives |
+| ≥1 | `util/to_string` (2), `util/backtrace` (1) | exactly the two blocked on iostreams construction |
+
+`util/backtrace`'s park already named `std::stringstream` construction; this is the
+second occurrence — the promotion bar — and the grep turns a judgement call into one
+command. Proposed for reflection #6.
+
+Everything else `to_string` needs is callable — `ostream::operator<<(double|long|unsigned long)`
+and `ostream::write` are out-of-line members, and `__put_character_sequence`,
+`__pad_and_output`, `__quoted_output` are weak instantiations. If the two stream locals
+were passed in rather than constructed, the unit would be routine.
+
+It also has a static initialiser for `std::locale locale_classic`, and unlike
+`object_id`'s random state **this one's value is observable** — it is imbued into every
+stream and decides number formatting.
+
+### Correction: "nothing further can land without a shim" was wrong
+
+At the previous stop I wrote that nothing further could land from the front of the queue
+without one of the three shims. The clause "from the front of the queue" was doing more
+work than the sentence admitted, and the summary I gave the human implied the queue was
+exhausted. **It is not.**
+
+Screening forward past the wall, with the definer-count rule from reflection #5 applied,
+there are **five clean candidates**, all fully linked, no VTT, no `throw`, no
+sole-definer vtable:
+
+| # | unit | realm symbols linked | notes |
+|---|---|---|---|
+| 28 | `array_blob` | 14/14 | **byte-visible** |
+| 32 | `array_timestamp` | 55/55 | **byte-visible** |
+| — | `array_blobs_small` | 17/17 | **byte-visible** |
+| — | `array_blobs_big` | 19/19 | **byte-visible** |
+| — | `decimal128` | 48/48 | **byte-visible** |
+
+All five are array/value units whose bytes reach the `.realm`, i.e. the category the gate
+can actually judge — the same class as `array_unsigned`, which is still the only unit
+`diff-test` has ever failed on.
+
+`array_blob` and `array_timestamp` were classified "PARK: emits vtables" in my tick-2
+sweep using the pre-reflection-#5 `ZT*` test. The definer-count amendment releases both:
+their `ZT*` are coalesced, sole-definer count 0. That amendment has now released four
+units (`util/time`, `util/demangle`, `array_blob`, `array_timestamp`) and parked one
+(`impl/output_stream`).
+
+### So the honest state of the queue
+
+The wall is at **positions 21–27**, not at the end. Six of those seven are genuinely
+unportable, and the queue's size-and-depth ranking put them all in a row. Behind them sit
+five clean byte-visible units.
+
+That strengthens the `gen_queue.py` proposal rather than replacing it: adding a `linked`
+column would have removed `version`, `util/resource_limits` and `util/platform_info`
+outright, and sorting the remainder by `inbound` rather than lines would have surfaced the
+array units before the wall instead of after it.
+
+Also worth recording against the three-consecutive-parks rule itself: it has now fired
+twice, and both times the parks were individually correct and the queue order was the
+real fault. The condition is doing its job; what it cannot do is distinguish "the queue is
+exhausted" from "the queue is mis-sorted", and those want opposite responses.
