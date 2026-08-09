@@ -662,3 +662,55 @@ how many other TUs a unit depends on, and it tests the exact mechanism the hybri
   has none (as `string_data.cpp` did), fall back to the crate probe.
 - Screening order that has now worked twice: live symbols → `grep -c throw` → STL
   by-value returns → check for static-initialiser dependencies.
+
+---
+
+## 2026-08-09 — `util/interprocess_mutex.cpp` ported; the C1/C2 and D1/D2 lesson
+
+`make verify` exit 0 at `rust units ported = 6`;
+`run_interprocess_mutex_differential.sh` passes on 28 probe lines.
+
+Small unit — only `SemaphoreMutex` has out-of-line definitions, the rest of the header
+is inline — but it carried one ABI fact worth writing down.
+
+### Constructors and destructors come in pairs
+
+The Itanium ABI emits a **complete-object** constructor (`C1`) and a **base-object**
+constructor (`C2`), and likewise `D1`/`D2` for destructors. With no virtual bases they
+are behaviourally identical, and the C++ compiler emits *both symbols*. A port that
+defines only `C1`/`D1` links fine right up until some caller references the other form.
+
+So: seven exported symbols for a class with three methods. Both variants delegate to one
+shared `construct`/`destruct` rather than being written twice.
+
+Generalising for the next class-shaped unit: get the symbol list from `nm` on the object
+and provide **every** name it exports, rather than working from the class declaration in
+the header. The header shows three methods and a constructor; the object shows seven
+symbols.
+
+### Layout is not the port's to choose
+
+`SemaphoreMutex` is one `dispatch_semaphore_t`, so `this` is a pointer to a pointer. The
+layout is fixed by the header that every *other* TU still compiles against, so the Rust
+side has no freedom here — it has to accept whatever the header says. This will be true
+of every class-shaped unit from now on, and is a good reason to prefer units whose
+members are simple.
+
+Apple-only upstream, with no `#else` branch, so the port is too, behind a
+`compile_error!`.
+
+### Differential shape, revisited
+
+Last unit needed the archive + link-order pattern because its dependencies exploded.
+This one does not: `interprocess_mutex.cpp.o` has exactly four undefined symbols, all
+libdispatch, so single-object linking works and each driver contains exactly one
+implementation — no ambiguity about which ran, and the crate-probe guard suffices.
+
+Both patterns are now in the tree. Choose by looking at `nm -u` on the object first:
+a short, self-contained undefined list means single-object linking; anything pulling in
+`util::Mutex`, `terminate`, or `Backtrace` means archive + link-order.
+
+### For the next unit
+
+- `nm -u <object>` before choosing the differential shape.
+- `nm -g <object>` and provide every exported symbol, not the ones the header implies.
