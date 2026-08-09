@@ -1662,3 +1662,99 @@ That sentence is about reachability. It generalises, and I did not apply it.
 `array_unsigned.cpp` is back in the queue and is the unit for the next iteration. It is
 still the only byte-visible candidate identified so far — the one unit whose bytes
 `make diff-test` can actually judge.
+
+---
+
+## 2026-08-09 — `array_unsigned.cpp` landed, and a correction to what "the gate judges it" means
+
+`make verify` exits 0 at `rust units ported = 7`.
+`migration/checks/run_array_unsigned_differential.sh` exits 0 on 311 probe lines.
+~50 minutes across two iterations.
+
+### Correction to the previous entry and to the commit message
+
+`5de9330` says this is "the first unit the gate can actually judge". That is true but
+I stated it more strongly than the evidence supported, and the fix is worth more than
+the claim. **Measured, by injecting bugs into the landed Rust and running both checks:**
+
+| Injected bug | `make diff-test` | differential |
+|---|---|---|
+| `bit_width`: `value < 0x10000` → `<= 0x10000` (differs at exactly 65536) | **passes, exit 0** | **fails**, 22 diverging lines |
+| `bit_width`: small values return 16 instead of 8 (differs everywhere) | **fails**, `erase_churn` + `many_commits` | fails |
+
+So the gate does judge this unit — the broad bug is caught, which is more than has ever
+been true before. But its coverage is **shallow**: the traces only ever drive
+`ArrayUnsigned` through the 8-bit path. A width bug that first bites at the 16-, 32- or
+64-bit boundary is invisible to `make verify` and visible only to the differential.
+
+The narrow bug is not a contrived one. `value == 65536` is exactly the kind of
+off-by-one a width calculation gets wrong, and it is the bug class
+`format-fidelity.md` opens with.
+
+### What actually exercises the unit
+
+Instrumented all ten exported functions, ran every trace, printed on first call:
+
+```
+erase_churn        create erase get insert lower_bound update_from_parent
+many_commits       create erase insert lower_bound update_from_parent
+smoke              <none>
+string_widths      <none>
+width_boundaries   <none>
+```
+
+Six of ten functions, two of five traces. **`set`, `truncate` and `upper_bound` are
+reached by nothing**, which is why the differential exists and why it walks every width
+boundary and every insertion position.
+
+Note `width_boundaries.trace` reaches this unit **not at all**, despite its name. It
+exercises width packing in `Array`, not `ArrayUnsigned`. Anyone reading the trace list
+and assuming otherwise — as I nearly did — would conclude the width paths were covered.
+
+### The instrumentation technique, which is reusable and cheap
+
+Ten `AtomicUsize` counters, one per exported symbol, printing on the 0→1 transition,
+then `make hybrid` and run each trace. Five minutes, and it converts "the linker keeps
+these symbols" into "these traces call these functions". `evidence-and-linkage.md`
+classifies units by whether symbols survive to the link; that is a necessary condition
+for coverage and not a sufficient one, and this closes the gap. Proposed for
+reflection #4 as a step to run **after** a port lands, before writing down what the
+gate proved.
+
+### Format decisions
+
+- **Layout from the compiler.** `Node` is polymorphic: vptr at 0 shifts every field by
+  8, and `m_width` packs into the base's tail padding at **53**, not after it.
+  `offset_of` assertions on all nine members plus `size_of == 64` are in the source, so
+  a future header change breaks the build rather than the file.
+- **`set_width` shifts by 64 when `width == 0`** — UB in C++. x86-64 `shr` masks the
+  count mod 64, so the observed result is a shift by zero and `m_ubound` becomes
+  `UINT64_MAX`. `wrapping_shr` reproduces the masking. A plain `>>` panics in Rust
+  *regardless of* `overflow-checks` — shift overflow is always checked — so the
+  "obvious" translation turns a working array into an abort.
+- **The header width field is an off-by-one log2**: `(1 << (h[4] & 7)) >> 1`, so
+  3→4 and 7→64. `set_width_in_header` counts shifts to invert it; a `leading_zeros`
+  rewrite gives a different byte.
+- **`insert`'s `else if (ndx != m_size)` reads `m_size` after `Node::alloc` bumped
+  it**, so it is comparing against `old_size + 1` and is always true. Mirrored rather
+  than simplified — the bytes are the same today, the code is not.
+- `realm::lower_bound<w>` compares `int64_t` while `ArrayUnsigned` passes `uint64_t`,
+  so values above `INT64_MAX` compare negative. The differential probes
+  `0x8000000000000000` and `UINT64_MAX` specifically for this.
+- `get_direct` reads through `const char*`, signed on x86-64 Darwin; widths 1/2/4 mask
+  off every sign-extended bit. Mirrored with `i8` rather than relying on that argument.
+
+### Assumptions
+
+- `REALM_UNREACHABLE()` at lines 120 and 158 is live in this build (`assert.hpp:99`,
+  under no `#if`) and is reproduced as a call to `realm::util::terminate`, not a Rust
+  panic and not `unreachable_unchecked`.
+- The two virtual dispatches use slot indices measured off the Itanium pmf encoding and
+  kept in one `vtable_slots` module. The differential's link-order guard checks the
+  Rust won the link, but **nothing checks the slot indices at runtime** — if the header
+  ever reorders those virtuals, both stacks would have to be rebuilt for the mismatch
+  to appear, and it would show as a crash rather than a diff. Cheapest mitigation would
+  be a static assertion generated from the pmf probe; not built, recorded here.
+- `panic = "abort"` means a `std::bad_alloc` from `create_node`/`Node::alloc` aborts
+  rather than propagating to the C++ caller. Same divergence `base64` documented,
+  allocation-failure path only.
