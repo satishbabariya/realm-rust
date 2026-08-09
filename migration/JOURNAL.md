@@ -4096,3 +4096,94 @@ exhaustively rather than sampled.
 less: it is byte-invisible, its whole observable behaviour is printing and aborting, and it
 needs `Backtrace::capture`/`print`/`~Backtrace` plus `Printable::print_all` imported — four
 `#[link_name]` bindings into a unit that is itself parked as unportable.
+
+---
+
+## `upstream/src/realm/decimal128.cpp` — started, not ported — 2026-08-09
+
+**No gate was run. Nothing is wired into the hybrid.** What landed is the oracle-side
+scaffolding and the generated tables, committed on their own because they took measurement
+to get right and are what the port will be judged against. Full detail in
+`migration/checks/decimal128/README.md`.
+
+### The finding: the whole unit is one constructor
+
+1,848 lines, and the cleanest screen of any large unit left — 48/48 linked, zero `ZT*`,
+zero `VTT`, zero `throw|catch|try`, one realm-undefined symbol. But:
+
+| lines | what |
+|---|---|
+| 62..433 | seven vendored Intel tables |
+| 434..1353 | `realm_binary64_to_bid128` — 919 lines of macro-expanded Intel code |
+| 1358..1848 | the actual `Decimal128` methods, ~490 lines |
+
+**47 of the 48 exported symbols are thin wrappers over BID functions that already link** —
+`bid128_add/_sub/_mul/_div/_quantize/_from_string/_to_string/_quiet_equal/_quiet_less/
+_quiet_greater/_to_int64_int/_to_bid32/_to_bid64/_from_uint64`, `bid32_to_bid128`,
+`bid64_to_bid128`, plus the `__bid_IDEC_glbround` global. Rust binds those and the methods
+are straightforward.
+
+The 48th is `Decimal128(double, RoundTo)`, and it is the entire difficulty.
+
+### Why the conversion cannot be linked — three separate measurements
+
+The comment at `decimal128.cpp:1352` says the function was vendored to avoid ~2MB from
+`bid_binarydecimal.c`. Measured, the consequences are stronger than the comment implies:
+
+1. `binary64_to_bid128` is **defined nowhere in this build** and absent from
+   `build/oracle/trace_runner`. The linked Intel objects cover arithmetic, quantize and
+   string conversion; **no `binary*` conversion entry point exists at all**.
+2. `realm_binary64_to_bid128` is not in `decimal128.cpp.o`'s symbol table **at all** —
+   anonymous namespace, inlined into its only caller at `-O3`. Only the tables survive, as
+   `non-external`. So this is not the `translate_critical` situation: there is no hidden
+   symbol to link a probe against, there is no symbol.
+3. Making the library version available means adding a source file to the build. Forbidden.
+
+Step 8 of `unit-screening.md` classifies this correctly: what was inlined is bit-unpacking
+arithmetic Rust can reimplement, not a lambda handed to a C++ template. Portable, not a park.
+
+### Decision recorded before it is made: mirror, do not re-derive
+
+A faithful transcription is ~700 lines of Rust. A re-derivation is about 80 — a double is
+exactly `m × 2^e`, so exact bignum arithmetic gives the decimal, rounded to 34 significant
+digits. That is genuinely what the function computes.
+
+**Mirroring anyway**, and the reason is worth keeping: the short route is tempting exactly
+*because* it is short, and the places the two would diverge — the `pfpsf` flag bits, the
+two `bid128_quantize` retry paths in the constructor, the rounding-mode global — are
+invisible to a casual test and visible in a stored `.realm` byte. Written down so the next
+iteration does not rediscover the shortcut and mistake it for a new idea.
+
+### The tables are generated because parsing them is wrong
+
+First attempt pulled them out of the source with a regex and got **5 of 7 row counts
+wrong**: 76/27/505/228/148 where the compiler says 49/20/49/80/128. Two independent causes
+— index annotations inside comments look like table data, and several entries are
+*expressions* rather than literals (`bid_roundbound_128` contains `(1ull << 63)`).
+
+So `emit_tables.cpp` includes the original definitions and prints them, and
+`tables.rs` is generated from that output. Same lesson as "get the ABI off the built
+object, not out of your head", in a register with nothing to do with ABI: **when a
+translation step can be checked against the compiler, check it, because a plausible-looking
+wrong answer is the default.** The regex version would have compiled fine.
+
+### Corpus
+
+`Decimal128(double, RoundTo)` is a pure function of one double, so the input domain can be
+attacked directly rather than sampled through an API — the `unicode` luxury again.
+`gen_doubles.py` emits specials, every one of the 2048 exponents at nine significands and
+both signs, the denormal boundary, exact powers of 10 and 2, the `a == 48` fast-path cutoff
+(`5**49 > 10**34`), 15- and 17-digit cases, then a seeded random tail. 46,519 doubles
+before the random tail; the oracle emitter converts all of them.
+
+**The differential must compare `pfpsf` as well as the coefficient.** The flags are an
+output of this function, and a driver that printed only the value would miss a whole class
+of divergence — the `base64` capacity mistake in a new costume.
+
+### Why it stopped here
+
+Transcribing 919 lines of numeric code and 490 lines of methods, then building the
+differential and running the gate, did not fit the remaining context at the quality this
+needs. A rushed transcription is precisely how a wrong byte in a rare double ships behind a
+green differential, which is the failure this whole harness exists to prevent. The
+scaffolding is committed so the transcription starts from verified inputs.
