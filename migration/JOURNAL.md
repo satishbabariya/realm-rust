@@ -3437,3 +3437,60 @@ decision, recorded here rather than acted on.
 `array_blobs_small`, deviating from queue order for the reason above and flagging it, as
 with `object_id` and `array_blob`. `array_timestamp` is not parked — it is portable and
 should be ported, just after the two units the gate can judge.
+
+---
+
+## 2026-08-09 — queue reordered by evidence; `array_blobs_small` measured, not started
+
+The human delegated the open decisions. Of the four I had been escalating, three are
+permission-denied by design and stay that way — the `Makefile`'s `shim-report` recipe,
+`.claude/loop.md`'s stop conditions, and `harness/traces/`. I will stop re-raising them.
+The fourth, `migration/gen_queue.py`, is writable and was the highest-leverage thing
+available, so it was rewritten (`92ec057`).
+
+### Queue now ranks on measurement
+
+`linked` (realm-owned symbols surviving into `trace_runner`) and `status`
+(ported/blocked/pending) are computed and sorted on, ahead of depth, inbound and size.
+103 units, 68 pending, **12 unreachable**, and every dead unit is out of the head. The
+generator degrades honestly: with no oracle built the column reads `?` and the file says
+so, so an unmeasured queue cannot be mistaken for a measured one.
+
+What it still cannot compute is whether a **trace** reaches a unit — an lldb sweep per
+unit per trace is minutes each. The file says so and names the live case:
+`array_timestamp` is now queue #1 on every computable measure (depth 1, inbound 9, 55
+linked) and **no trace reaches it**, so it is a worse next unit than it looks.
+
+### Next unit is `array_blobs_small`, and why
+
+Deviating from the regenerated queue's #1, sanctioned by that file's own note. Screened
+clean on all eight steps: 17/17 linked, no sole-definer `ZT*` (34/38/24 definers), zero
+throws with no realm-owned EH site, zero VTT. And traced — `insert` 46 hits, `set` 4,
+across the five traces.
+
+Nine strong symbols: `create_array`, `init_from_mem`, `add`, static `get`, `set`,
+`erase`, `insert`, `find_first`, `get_string_legacy`.
+
+**Layout measured, and it is the largest object yet.** `sizeof = 448`: an `Array` plus
+three *embedded* 112-byte arrays, each with its own pair of vptrs.
+
+```text
+   0 | class realm::Array          (the base, 112 bytes, 2 vptrs)
+ 112 |   Array     m_offsets       (112 bytes, 2 vptrs)
+ 224 |   ArrayBlob m_blob          (112 bytes, 2 vptrs)  <- already Rust
+ 336 |   Array     m_nulls         (112 bytes, 2 vptrs)
+```
+
+So constructing one means constructing four `Array`-shaped objects and wiring each
+sub-array's parent to the container's `ArrayParent` subobject at +56 with a distinct
+`ndx_in_parent`. The ABI ground is already broken — `array_blob` established the
+112-byte two-vptr layout, the `&vtable[2]` / `&vtable[10]` offsets, and the +56
+adjustment — but this is four times the construction and three coordinated arrays
+(offset table, blob payload, null flags).
+
+**Not started, and deliberately so.** This is a traced, byte-visible unit where the gate
+can catch a mistake on every trace; starting it with too little room to verify is the
+wrong risk on exactly the unit where correctness is most checkable. Recorded here so the
+next iteration starts from the layout rather than re-deriving it, and — per reflection
+#3's rule, invoked against myself as with `array_blob` — the next iteration lands it or
+parks it. A second measuring pass is the failure mode.
