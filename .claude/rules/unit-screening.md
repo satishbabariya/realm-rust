@@ -40,11 +40,49 @@ not which it mentions, and not only the external ones:
 nm $OBJ | grep -v ' U ' | grep -E '__ZT[VIS]'
 ```
 
-Any hit means this is some class's **key-function TU**: the compiler emits the vtable,
-typeinfo and typeinfo-name here and nowhere else, with `__cxa_pure_virtual` filling the
-slots of pure virtuals. Porting it means synthesizing all three from Rust. Park unless
-the vtable/RTTI shim already exists — that shim is shared infrastructure, not something
-to improvise inside one unit. Three units currently gate on it
+A hit means the object defines the symbol. It does **not** yet mean this is the class's
+**key-function TU**, and only the key-function case is a park.
+
+> **Corrected 2026-08-09 (reflection #5). A defined `ZT*` is not the test; the
+> definer count is.** "Emitted here and nowhere else" holds only for a class with a key
+> function — the first non-inline, non-pure virtual. Two common shapes have **no key
+> function at all** and get `weak external` vtables emitted into *every* TU that needs
+> them, which the linker then coalesces:
+>
+> - a class whose virtuals are all inline or pure (`ExceptionWithBacktraceBase`)
+> - a template instantiation (`ExceptionWithBacktrace<std::invalid_argument>`)
+>
+> Removing such a TU orphans nothing and Rust would synthesize nothing.
+
+So the second measurement, per symbol, is how many objects in the archive define it:
+
+```
+nm -m build/oracle/realm-core/src/realm/librealm.a | grep " <mangled-ZT-symbol>$" | grep -vc undefined
+```
+
+| Definers | Meaning | Verdict |
+|---|---|---|
+| 1 | sole source; removing the TU orphans the vtable | **park** — the shim must synthesize it |
+| >1 | coalesced weak vtable, other TUs supply it | **not a park** |
+
+`non-external` (anonymous-namespace) symbols are definer-count 1 by construction, so the
+older local-vs-external distinction is a special case of this one and is dropped in
+favour of it. **Do not read the `weak`/`external` attribute as the answer** —
+`util/compression` defines four `weak external` vtables and is still the sole definer of
+all four.
+
+Measured:
+
+| Unit | `ZT*` defined | definers | verdict |
+|---|---|---|---|
+| `util/time` #16 | 6 | **2 and 5** — one of five objects defining them | **not a step-2 park.** The screen sent it here and was wrong |
+| `util/basic_system_errors` #8 | 3 × `non-external` | 1 | park stands |
+| `util/compression` #14 | 19, incl. 4 × `weak external` | **1** each | park stands |
+
+When the definer count is 1, porting the unit means synthesizing vtable, typeinfo and
+typeinfo-name from Rust, with `__cxa_pure_virtual` filling the slots of pure virtuals.
+Park unless the vtable/RTTI shim already exists — that shim is shared infrastructure,
+not something to improvise inside one unit. Three units currently gate on it
 (`util/misc_ext_errors`, `util/basic_system_errors` #8, `obj_list` #15).
 
 Both simpler forms of this command are wrong, in opposite directions, and both have
@@ -105,10 +143,33 @@ landing-pad-only, therefore park"* was drafted from `util/backtrace` alone and i
 **false**: it would have parked `error_codes`, `util/to_string` and `util/terminate`,
 all of which import both symbols and contain no reachable throw of their own.
 
-**6. STL by value in any signature.** `std::string`/`std::vector` returned by value
-means an `sret` pointer and C++-allocator ownership rules. Possible — `base64` did it —
-but never something to discover mid-port. Buffers handed back to C++ must come from
-`operator new`.
+**6. Non-trivial types by value in any signature.** `std::string`/`std::vector`
+returned by value means an `sret` pointer and C++-allocator ownership rules. Possible —
+`base64` did it — but never something to discover mid-port. Buffers handed back to C++
+must come from `operator new`.
+
+**Triviality decides the return class, not size.** Under the Itanium ABI, any type with
+a user-provided destructor, copy constructor or move constructor is **MEMORY class
+regardless of how small it is**: hidden result pointer in `rdi`, and the callee returns
+that same pointer in `rax`. Two measured cases, in opposite directions:
+
+| Returned type | Size | Trivial? | Passing |
+|---|---|---|---|
+| `std::optional<size_t>` (`util/base64`) | 16 B | yes | **registers** — `rax:dl` |
+| `util::bind_ptr<ErrorInfo>` (`status`) | 8 B, one pointer | **no** — `~bind_ptr() { unbind(); }` | **`sret`** |
+
+Declaring `bind_ptr` as an 8-byte struct return cost an hour on `status`: Rust returned
+it in `rax`, so **every argument shifted by one register** and a small integer was
+dereferenced as a `std::string*`. Size is not a shortcut here — grep the type's header
+for a user-provided `~T`, `T(const T&)` or `T(T&&)` before writing the signature.
+
+The cheapest confirmation is the oracle's own prologue, and it takes a minute:
+
+```
+6a: movq %rdx, %rbx     ; reason  = 3rd argument
+6d: movl %esi, %r14d    ; code    = 2nd argument
+70: movq %rdi, %r15     ; sret    = 1st argument
+```
 
 **7. Static-initialiser dependencies.** Check whether anything in the unit runs before
 `main`, and whether the unit's globals are set by a static initialiser or by an explicit
@@ -148,14 +209,14 @@ misreading and un-parked after two three-line link probes settled it in five min
 
 ## What each step does **not** tell you
 
-**A symbol-table read is never sufficient to park a unit.** That is the whole section in
-one line, and it is the most-confirmed claim in this repo: six consecutive iterations
-have each parked, or nearly parked, a unit on an `nm` result that answered a narrower
-question than the step it served — one at step 2, three at step 3, one at step 5, and
-one on a symbol *attribute* read in the wrong artifact. Each was a different step, so
-each time the fix looked like "add a row to the table", and the next iteration found a
-new row. The table below is still worth having, but it is a list of instances, not the
-rule. The rule is the escalation:
+**A symbol-table read is never sufficient to park a unit — or to clear one.** That is the
+whole section in one line, and it is the most-confirmed claim in this repo: eight
+consecutive iterations have each parked, nearly parked, or wrongly cleared a unit on an
+`nm` result that answered a narrower question than the step it served — one at step 1,
+two at step 2, three at step 3, one at step 5, and one on a symbol *attribute* read in
+the wrong artifact. Each was a different step, so each time the fix looked like "add a
+row to the table", and the next iteration found a new row. The table below is still
+worth having, but it is a list of instances, not the rule. The rule is the escalation:
 
 > When a screen step is about to decide port-or-park, take a **second measurement of a
 > different kind** — one that does not read a symbol table. Dump the record layout, read
@@ -171,6 +232,8 @@ Instances, each confirmed on a named unit:
 
 | Step | Narrow question it answers | Wrong conclusion | Disambiguate with |
 |---|---|---|---|
+| 1 `comm -12` over `grep '^__Z'` | how many mangled symbols survive to the link? | "8 of 14 linked, so it is reachable" | **filter to realm-owned symbols** (`^__ZN[A-Z]*5realm`). `version.cpp`'s 8 survivors are all libc++ weak helpers; **zero** `realm::Version` symbols link. The same filter keeps `util/enum` and `util/cli_args` correctly parked, which the naive count would have released |
+| 2 `nm $OBJ \| grep -E '__ZT[VIS]'` | which `ZT*` does this object **define**? | "it defines one, so it is the key-function TU — park" | **count definers across `librealm.a`.** `util/time` defines six and shares every one with 1–4 other objects: no-key-function classes emit `weak external` vtables everywhere and the linker coalesces |
 | 2 `grep ZTV\|ZTI\|ZTS` | is this the **key-function TU**? | "the class is not polymorphic, so the layout is what the header says" | `clang -Xclang -fdump-record-layouts`. `array_unsigned.cpp.o` has no `ZT*` symbol, yet `Node` has a vptr at offset 0 and every field is shifted 8 bytes |
 | 3 `nm -u` (short list) | what must the **linker** still resolve? | "few dependencies, therefore self-contained" | read the body. Templates, lambdas passed to templates, and inline members of other realm classes were compiled in, not linked — they leave `nm -u` entirely (`column_binary.cpp`: 4 undefined symbols, unportable) |
 | 3 `nm -u` shows `util::terminate` | does any **unconditional** assert survive? | "assertions are live in this build" | `assert.hpp` + the cache. `REALM_ASSERT_RELEASE` and `REALM_UNREACHABLE()` are under no `#if` and always call `terminate`; `REALM_ASSERT*` are separately gated. 42 of 67 `Storage` objects reference `terminate` |

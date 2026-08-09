@@ -122,3 +122,19 @@ construction.
 Contrast `util/time.cpp`, screened the same day: its `ZT*` are also `weak external` but
 have **5** definers, so removing that TU orphans nothing and step 2 does not apply to it
 at all. See `migration/blocked/util-time.md` for the amendment this produced.
+
+## Audit, reflection #5 (2026-08-09)
+
+Both observations from this park were promoted, one in a sharper form than proposed.
+
+- The step-2 definer counts here (**1** for all four externally-visible `ZT*`, despite
+  the `weak external` attribute) are now the worked example of "sole definer ⇒ park" in
+  `.claude/rules/unit-screening.md`. Verdict unchanged.
+- This entry proposed: *"when step 1 shows partial linkage, check whether the linked
+  subset contains the functions the unit is named for."* A second occurrence
+  (`version.cpp`, 8/14 naive and **0/6** realm-owned) turned that judgement call into a
+  mechanical filter, and it is the filter that was promoted: **intersect realm-owned
+  symbols only**, `^__ZN[A-Z]*5realm`. Re-measured here, this unit is **4 of 20** realm
+  symbols linked, and the surviving four are the `InputStream`/`SimpleInputStream` vtable
+  and RTTI — scaffolding, not payload. The "12 of 34" in the body above was inflated by
+  eight libc++ weak helpers that link regardless of this TU.

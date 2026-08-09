@@ -498,6 +498,18 @@ None of these was acted on. All are outside what `/reflect` may change.
    iterations and one batch commit establishing that by hand. This changes only the
    planning order, never a gate.
 
+   **Sharpened 2026-08-09 (reflection #5), with the exact filter.** The column must
+   intersect **realm-owned symbols only** — `nm -g $OBJ | grep -v ' U ' | awk '{print
+   $NF}' | grep -E '^__ZN[A-Z]*5realm'` — not all mangled symbols. Counting all of them
+   scores `version.cpp` at 8/14 when its true realm-owned reachability is **0 of 6**, and
+   scores the correctly-parked `util/enum` and `util/cli_args` at 5/15 and 5/16 when both
+   are 0. The inflation is libc++ weak template instantiations (`__ZNSt3__1…`) that link
+   regardless of the unit. Also note the ranking evidence has grown to three units:
+   `util/compression` #14 (947 lines, 4/20 realm and no compression function among the
+   four) and `version` #19 (0/6) both sort ahead of `object_id` #25 and `util/to_string`
+   #27, which screen clean. Size is a proxy for effort, not for value, and the queue has
+   no column for the latter.
+
 2. **Extend the trace schema before porting anything that needs it.** The current
    schema is scalar-only (int, string, double, bool) with `realm_compact()` before every
    close. Concretely missing: no trace builds a **string index**, which is why
@@ -542,6 +554,15 @@ None of these was acted on. All are outside what `/reflect` may change.
    as "not measured" rather than as a value. Reflection #3 flagged this prospectively;
    this is the confirmation. Not acted on — `.claude/loop.md` defines when the loop
    stops.
+
+   **Corrected 2026-08-09 (reflection #5). The "risen every time" half of this is now
+   false.** Reflection #5 landed two units for six boundary points and the ratio **fell**,
+   4.0 → 5.5 → 5.86 → **5.22**. The monotonic rise was an artifact of which units had
+   landed — `interprocess_mutex`'s mandatory C1/C2 and D1/D2 duplicates, and
+   `array_unsigned`'s ten-method class — not a trend. **The refinement being requested is
+   unchanged and is the vacuous-window half**, which reflection #3 still demonstrates: a
+   window with zero landings reads as flat and silently resets the counter. The rise
+   half of the argument is withdrawn.
 
 5. **`width_boundaries.trace` does not reach `ArrayUnsigned`, and no trace does at any
    width above 8 bits.** This is proposal #2's coverage gap, now with a measurement
@@ -2401,3 +2422,218 @@ port just took. The object file's undefined `_memset` is the C++ doing the same.
   `Status::reason() const::empty`, the weak inline-function-local static. Two definers in
   `librealm.a`, so it survives in both builds and is not a usable fingerprint — the
   differential falls back to the crate probe plus an address-distance check.
+
+## 2026-08-09 — reflection #5 (a reachability metric that was counting libc++; first fall in the per-unit boundary count)
+
+Covers `14f0aa1` through `cdedef7`, four iterations.
+
+**Units attempted: 4. Landed: 2. Parked: 2.** Plus one unit parked by this reflection on
+a re-measurement, without an iteration ever opening it.
+
+| Iteration | Unit | Outcome |
+|---|---|---|
+| `14f0aa1` | `error_codes.cpp` #13 | **landed** — tables generated from the oracle |
+| `7ec2b70` | `util/compression.cpp` #14 | parked — 19 `ZT*`, real throws, dead payload |
+| `f9de5db` | `util/time.cpp` #16 | parked on step 5, and explicitly **not** on step 2 |
+| `cdedef7` | `status.cpp` #17 | **landed** — `format-compat` caught an `sret` bug `diff-test` did not |
+| this reflection | `version.cpp` #19 | **parked** — reflection #4 had listed it as a candidate |
+
+**What `make verify` actually reported: exit 0, re-run fresh during this reflection**,
+not inherited. `rust units ported = 9`; determinism 5/5; diff-test 5/5 pass;
+format-compat 14 `ok` and 9 `skip … both stacks reject it`; the deliberately-wrong stack
+caught 5/5. `VERIFY PASSED — oracle deterministic, hybrid byte-identical, corpus agrees.`
+Reflection #4 did not re-run it and said so; this one did.
+
+### Convergence — the per-unit count fell for the first time
+
+| | #1 | #2 | #3 | #4 | #5 (today) |
+|---|---|---|---|---|---|
+| C++ TUs in `upstream/src/realm` | 230 | 230 | 230 | 230 | 230 |
+| Rust source files | 5 | 8 | 8 | 9 | 12 |
+| shim / extern-C boundary points | 12 | 33 | 33 | 41 | **47** |
+| units ported | 3 | 6 | 6 | 7 | **9** |
+| **boundary points per ported unit** | 4.0 | 5.5 | 5.5 *(vacuous)* | 5.86 | **5.22** |
+| `TODO(shim)` + `unimplemented!` | 0 | 0 | 0 | 0 | **0** |
+| realm-owned mangled imports | — | — | — | 5 | **6** |
+
+Two units landed for six new boundary points between them — `error_codes` exports 7 for
+7 symbols, `status` 4 for 4, with the rest import blocks. No C1/C2 inflation, no
+half-ported unit. **This is the first window in which the per-unit ratio declined**, and
+it refutes reflection #4's observation that it "has risen every time anything landed".
+Recorded as a correction to proposal #4 rather than left standing.
+
+`TODO(shim)` and `unimplemented!` remain 0 across all five windows: every entry in
+`ported_units.txt` is served completely from Rust. By reflection #2's own test that is
+the ABI-tax reading, not the spreading reading. **No consolidation recommended.**
+
+**The realm-owned-import metric reflection #4 asked for is itself miscounted.** #4
+proposed `grep -c 'link_name = "_ZN5realm'`. That regex misses **const member
+functions**, which mangle as `_ZNK5realm…` — today it returns 5 and the true count is 6,
+the missing one being `Allocator::translate_critical`. Use `_ZN[A-Z]*5realm`. The six
+are five in `array_unsigned` and one in `status` (`ErrorCodes::error_string`, a call
+from one ported unit into another — the first of those, and the good kind).
+
+### The finding that mattered most: step 1 was counting libc++ as reachability
+
+`util/compression`'s park entry proposed an amendment — *when step 1 shows partial
+linkage, check whether the linked subset contains the functions the unit is named for*.
+One occurrence, so per the reflect method it was journalled and not promoted. This
+reflection looked for the second occurrence in the obvious place, `version.cpp` #19, the
+other partially-linked unit in reflection #4's table, and found it.
+
+The step-1 command filtered defined symbols with `grep '^__Z'`. That keeps every mangled
+C++ symbol, and most objects define a few **libc++ weak template instantiations** —
+`std::__throw_length_error`, `__put_character_sequence`, `basic_stringstream`'s
+constructor, `__pad_and_output`. They arrive with any `<sstream>` or `std::string` use,
+they are emitted into dozens of TUs, and they are in `trace_runner` whether or not the
+unit under test is. They inflate every reachability count and carry no information.
+
+Filtering to `^__ZN[A-Z]*5realm`, over the near queue:
+
+| unit | naive `^__Z` | realm-only | effect |
+|---|---|---|---|
+| `version` #19 | 8 / 14 | **0 / 6** | **candidate → park.** No `realm::Version` symbol links at all |
+| `util/compression` #14 | 12 / 34 | **4 / 20** | park stands; the live 4 are vtable/RTTI, no compression function |
+| `util/enum` #4 | 5 / 15 | **0 / 3** | park stands — the naive count would have **released** it |
+| `util/cli_args` #6 | 5 / 16 | **0 / 7** | park stands — same |
+| `util/demangle` #18 | 16 / 17 | **5 / 6** | genuinely reachable; the one absentee is `demangle(const std::string&)` |
+
+Confirmed in both directions, which is the test reflection #4 established before
+promoting anything: it parks a unit the old filter cleared, and it holds two parks the
+old filter would have released. Promoted to `evidence-and-linkage.md` as a **mechanical
+filter** rather than the judgement call the compression entry proposed — "does the linked
+subset contain what the unit is named for" needs a human; `^__ZN[A-Z]*5realm` does not.
+
+The cost of not having had it: `version.cpp` sat in reflection #4's near-queue table as
+clean by every step, with `partial linkage` as a parenthetical. It was one of the units a
+next session would plausibly have picked up, and a green `make verify` on it would have
+recorded progress nothing can substantiate — the exact failure the rules file opens with.
+
+### Promoted this window
+
+Four changes, each with the units that confirmed them.
+
+1. **`evidence-and-linkage.md`, step 1 — count realm-owned symbols only.** Two
+   occurrences (`version`, `util/compression`), plus two confirmations in the opposite
+   direction. Above.
+2. **`unit-screening.md`, step 2 — the definer count decides, not the definition and not
+   the attribute.** Proposed by the `util/time` park; re-measured independently here
+   (its six `ZT*` have 2 and 5 definers in `librealm.a`). A class with no key function —
+   all-inline/pure virtuals, or a template instantiation — emits `weak external` vtables
+   into every TU that needs them and the linker coalesces. `util/compression` is the
+   counterweight: four `weak external` vtables, definer count **1** for all four, park
+   stands. The `non-external` case is definer-count-1 by construction, so the old
+   local-vs-external wording is now a special case and was dropped in favour of this.
+3. **`unit-screening.md`, step 6 — triviality decides the return class, not size.** Two
+   occurrences in opposite directions across separate sessions: `base64`'s
+   `optional<size_t>` is 16 bytes, trivial, returned in registers; `status`'s
+   `bind_ptr<ErrorInfo>` is 8 bytes, has a user-provided destructor, and is MEMORY class.
+   Getting it wrong shifted every argument register and cost about an hour.
+4. **`evidence-and-linkage.md` — a differential can only see what it prints.** Two
+   occurrences: `base64` (vector capacity) and `status` (an `ErrorInfo` refcount one too
+   high is a *leak*, and a leak moves no printed value). Both needed a number no caller
+   would ever look at. Carries the counting-`operator new` technique, the
+   break-it-on-purpose instruction, and the terminator-vs-line-count guard.
+
+Also added, at one occurrence but as an **exception to a rule now known to be wrong in
+that case** rather than as a new rule: the "reachable, byte-invisible" row of the
+category table said `diff-test` proves "the link is intact, nothing more". `status`
+refutes it. Its `sret` bug passed `diff-test` **5/5** — no trace constructs an error
+`Status` — and failed `format-compat` on 9 of 23 corpus files with `hybrid exit=139`,
+exactly the 9 files the oracle exits 1 on. Opening a corrupt or too-old realm is what
+builds an error `Status`, so the error path is exercised by `format-compat` and by
+nothing else. The rows printing `skip … both stacks reject it (exit 1) — agreement is
+the check` are doing real work and had never caught anything before.
+
+### The screening pattern, eighth and ninth occurrences
+
+`unit-screening.md`'s opening claim was "six consecutive iterations"; it is now **eight** —
+one at step 1, two at step 2, three at step 3, one at step 5, one on an attribute read in
+the wrong artifact. The section header also gained *"or to clear one"*: seven of the
+eight were units nearly parked wrongly, and `version` is the first where the narrow
+measurement wrongly **cleared** a unit. That is the more dangerous direction, because a
+wrong park costs a unit and a wrong clear costs a false green.
+
+Two of this window's four iterations caught their screening error *before* writing a
+wrong park, up from one of six. The escalation rule reflection #4 promoted — take a
+second measurement of a different kind — is being applied prospectively now rather than
+discovered in the next reflection.
+
+### Blocked directory audit
+
+Thirteen entries, now fourteen. Nothing that landed this window unblocks anything.
+
+- **`version.md` — new.** Parked on the corrected step-1 measurement. Unblocks only if a
+  trace or corpus file causes `realm::Version` to link, which is a `harness/` change and
+  out of scope; treat as parked indefinitely, not pending.
+- **`util-time.md`** — annotated: its proposed step-2 amendment was promoted, with the
+  independent re-measurement (2 and 5 definers). Park unchanged; it is now the worked
+  counterexample for the step it is *not* parked on.
+- **`util-compression.md`** — annotated: its "12 of 34" is inflated by eight libc++
+  helpers and is really 4 of 20. Both its proposals promoted, one in sharper form.
+- `column_binary.md`, `obj_list.md`, `util-backtrace.md`, `util-basic_system_errors.md`,
+  `util-misc_ext_errors.md` unchanged.
+- The seven sync/tooling-unreachable entries unchanged; still one project-level
+  `REALM_ENABLE_SYNC` decision that hard rule 3 puts out of scope.
+
+Ratio check: 14 parks against 9 landed units, 3 parks decided on ABI cost rather than
+reachability, and one park reversed on re-measurement in an earlier window. The directory
+is neither empty nor a dumping ground.
+
+### Loop health
+
+Alternating land/park/park/land — no stop condition near, and the three-consecutive-park
+condition has not approached since `d5125e7`. The per-unit boundary count fell. Two
+`verify`-green units landed in one window for the first time since reflection #2.
+
+The standing vtable/RTTI **synthesis** shim recommendation is unchanged: three units
+(`util/misc_ext_errors` unreachable, `util/basic_system_errors` #8, `obj_list` #15), plus
+`util/compression` if the exception shim ever lands too. Still not urgent — this window
+landed two units without touching it.
+
+### What would most speed up the next session
+
+**Port `object_id.cpp` (#25)** — reflection #4's recommendation, which this window did
+not reach and which survives the corrected screen: **12 of 12 realm-owned symbols
+linked**, no `ZT*`, no `throw`, no `catch`, and not a single `__cxa_*` import. #4's
+preparatory notes still stand (C1/C2 pairs; `to_string()` returns `std::string` by value
+so step 6 applies with `base64` as the worked example; `gen()` is nondeterministic and
+belongs in a differential or out of scope; `hex_digits` at `object_id.cpp:48` is the
+archive-shape fingerprint symbol).
+
+Then `util/to_string` #27 (7/7 realm) and `impl/output_stream` #21 (8/8 realm). Both
+screen clean. `util/demangle` #18 is reachable at 5/6 but returns `std::string` by value
+*and* pulls `__cxa_demangle`; take it after `object_id` has settled the `sret` pattern.
+
+Two cheap things that would compound:
+
+- **Re-run the step-1 filter over the whole queue, not the near queue.** It took one
+  command over 26 units here and changed four verdicts. Reflection #2's lesson —
+  screening only the head of the queue is not a sample of the queue — applies to the
+  corrected filter as much as it did to the original screen.
+- **Backport the terminator guard to the five differentials still using `lines -lt N`.**
+  Ten minutes, and it removes a silent-pass mode from checks the project is relying on
+  for every byte-visible-but-untraced unit.
+
+### Deliberately not written
+
+- **No row added to `port-unit/SKILL.md`'s divergence table.** The one gate failure this
+  window was a `format-compat` segfault, not a byte divergence at an offset, so it
+  produced no offset-to-meaning mapping. The table stays at five rows. Where the lesson
+  did belong — `format-compat` covering the error path — is in `evidence-and-linkage.md`.
+- **Nothing about the `error_codes` oracle-generated tables was promoted.** The trade is
+  real and the landing entry states it plainly, but it is one occurrence and specific to
+  pure lookup tables. If a second table-shaped unit is generated the same way, that
+  becomes a rule about what the differential is then *for* (stale/truncated generation,
+  not transcription error) and not before.
+- **The `status` `std::string` low-bit `__is_long_` layout** stays in the landing entry.
+  One occurrence; if a second unit reads libc++ string internals it graduates to
+  `format-fidelity.md`.
+- **`migration/gen_queue.py` untouched**, though this window is the third piece of
+  evidence that size-ranking sends the loop at dead units: `util/compression` #14 (947
+  lines, payload dead) and `version` #19 both sorted ahead of `object_id` #25 and
+  `util/to_string` #27, which screen clean. Sharpened as proposal #1 instead.
+- **Nothing in `harness/`, the `Makefile`, `upstream/`, `CLAUDE.md`, `.claude/loop.md`,
+  `.claude/settings.json` or `.claude/hooks/`.**
+
+---

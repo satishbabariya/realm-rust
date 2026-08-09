@@ -20,20 +20,50 @@ queue twice.
 
 ```
 OBJ=build/oracle/realm-core/src/realm/CMakeFiles/Storage.dir/<unit>.cpp.o
-nm -g $OBJ | grep -v ' U ' | awk '{print $NF}' | grep '^__Z' | sort -u  # defined
-nm build/oracle/trace_runner | awk '{print $NF}' | sort -u              # linked
+nm -g $OBJ | grep -v ' U ' | awk '{print $NF}' | grep -E '^__ZN[A-Z]*5realm' | sort -u  # defined
+nm build/oracle/trace_runner | awk '{print $NF}' | sort -u                              # linked
 ```
 
 Intersect with `comm -12`. (The object path had `realm-core/src/realm/` missing until
 2026-08-09; realm-core is an `add_subdirectory`, so the objects are three levels below
 `build/oracle/`.)
 
-Intersect them. Four categories, and they need different evidence:
+> **Corrected 2026-08-09 (reflection #5). Count realm-owned symbols only.** The filter
+> was `grep '^__Z'`, which keeps every mangled C++ symbol the object defines — and most
+> objects define a handful of **libc++ weak template instantiations** (`__ZNSt3__1…`:
+> `__throw_length_error`, `__put_character_sequence`, `basic_stringstream`'s
+> constructor, `__pad_and_output`). Those come in with any `<sstream>` or `std::string`
+> use, they are emitted into dozens of TUs, and they are **always** in the linked binary
+> regardless of whether this unit is. They inflate every unit's reachability count and
+> never carry information about the unit.
+>
+> `^__ZN[A-Z]*5realm` matches `_ZN5realm…` and the const-qualified `_ZNK5realm…`; a bare
+> `_ZN5realm` misses every `const` member function.
+
+Measured across the near queue, the filter changes four verdicts and in both directions:
+
+| unit | naive `^__Z` | realm-only | verdict |
+|---|---|---|---|
+| `version` #19 | 8 / 14 — reads as "mostly reachable" | **0 / 6** | **unreachable → park.** Not one `realm::Version` symbol reaches `trace_runner` |
+| `util/compression` #14 | 12 / 34 | **4 / 20** | park stands, and the live 4 are vtable/RTTI scaffolding — no compression function is linked |
+| `util/enum` #4 | 5 / 15 — reads as "reachable" | **0 / 3** | park stands. The naive count would have **un**-parked it |
+| `util/cli_args` #6 | 5 / 16 | **0 / 7** | park stands. Same |
+
+The two directions matter equally. The naive count would have promoted `version` to a
+candidate — reflection #4's near-queue table did exactly that, on the strength of a clean
+`ZT*`/`throw`/`catch` screen, with the partial linkage noted only in passing — and it
+would have released two correct parks.
+
+Corollary, and the general form: **a linked libc++ helper is not evidence about the unit
+that happens to define it.** When linkage is partial, ask which *side* of the split the
+unit's own namespace fell on, not what fraction survived.
+
+Four categories, and they need different evidence:
 
 | Category | Test | Example | What `make diff-test` proves |
 |---|---|---|---|
 | **Unreachable** | 0 symbols survive into the linked binary | `util/misc_ext_errors`, `util/random`, 5 more | nothing — it passes for an empty file |
-| **Reachable, byte-invisible** | symbols linked, but output never reaches a `.realm` | `disable_sync_to_disk`, `util/base64` | the link is intact, nothing more |
+| **Reachable, byte-invisible** | symbols linked, but output never reaches a `.realm` | `disable_sync_to_disk`, `util/base64`, `status` | the link is intact, nothing more — but see `format-compat` below |
 | **Byte-visible, untraced** | could write file bytes, but no trace exercises that path | `string_data` (no trace builds a string index) | only that nothing else regressed |
 | **Byte-visible and traced** | a wrong byte fails a trace | `array_unsigned` — the first, 2026-08-09 | this is the real gate, and it is **shallower than it looks**; see below |
 
@@ -55,6 +85,16 @@ Rules that follow:
   "always write a differential" advice does not scale down. A 208-line harness
   comparing a bool getter against a bool getter is ceremony, not evidence
   (`disable_sync_to_disk`). Say in the journal that you skipped it and why.
+- **"Byte-invisible" means invisible to `diff-test`, not to the gate.** `make
+  format-compat` runs both stacks over `migration/corpus/`, and roughly half those files
+  are ones the oracle *rejects* — opening a corrupt or too-old realm is what builds an
+  error `Status`. So the error-construction path is exercised by `format-compat` and by
+  nothing else. `status.cpp` shipped an `sret` bug that passed `diff-test` 5/5 (no trace
+  constructs an error `Status`) and failed `format-compat` on 9 of 23 corpus files with
+  `hybrid exit=139`, exactly the 9 the oracle exits 1 on. The rows that print
+  `skip … both stacks reject it (exit 1) — agreement is the check` are comparing
+  *rejection behaviour*, and that is real coverage. **Before concluding a unit is
+  byte-invisible, ask whether it runs on the failure path.**
 
 ## Linkage is not coverage — measure which traces actually call the unit
 
@@ -138,6 +178,30 @@ implementation, so the crate probe suffices. Archive: assert that the C++ object
 (`a_popcount_bits` for `utilities.cpp`). Find that fingerprint symbol first — if the
 unit has none because it inlines everything into its exports (`string_data.cpp`), fall
 back to the crate probe.
+
+## A differential can only see what it prints
+
+Twice now a differential has reported PASS against a deliberately broken port, because
+the property it claimed to test never reached its output:
+
+| Unit | Failure mode | Why no printed value moved | The output that fixed it |
+|---|---|---|---|
+| `util/base64` | wrong `std::vector` capacity | every byte of content identical; capacity is not content | print `.capacity()` explicitly |
+| `status` | `ErrorInfo` refcount one too high | bind/unbind are symmetric, so an extra count is a **leak** — no printed value changes | replace global `operator new`/`delete` in the driver with counting versions, print the **net balance** over a block whose objects are all destroyed |
+
+**General form: for anything whose failure mode is a leak, a double free, an extra
+allocation, or a wrong capacity, the driver has to make the resource accounting itself
+an output.** Both cases needed a number no caller would ever look at. Verify the
+differential by breaking the port on purpose *before* trusting a PASS — the `status`
+driver reported PASS with the bug in the tree until the balance line was added.
+
+The Rust port calls the same `_Znwm`, so driver-level `operator new` counters see its
+allocations too — this works across the language boundary.
+
+**Completeness guard: assert a literal terminator, not a line count.** `lines -lt N`
+has to be re-tuned per unit and silently passes a driver that died one case early. Have
+the driver print `done` as its last line and check for that. Applied to
+`run_status_differential.sh`; the other five scripts still use line counts.
 
 ## Get the ABI off the built object, not out of your head
 

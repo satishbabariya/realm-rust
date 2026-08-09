@@ -96,3 +96,19 @@ in Rust. Both are the same infrastructure `util/compression` and `uuid` wait on.
 Given the unit is two `strftime`-adjacent wrappers whose output never reaches a `.realm`,
 it is a poor first customer for that shim. Prefer a unit where the exception path is
 incidental rather than the entire body.
+
+## Audit, reflection #5 (2026-08-09)
+
+The step-2 amendment this entry proposed was **promoted** into
+`.claude/rules/unit-screening.md`, after re-measuring the definer counts independently:
+
+```
+__ZTVN5realm4util22ExceptionWithBacktraceISt16invalid_argumentEE   2 definers
+__ZTVN5realm4util6detail26ExceptionWithBacktraceBaseE              5 definers
+```
+
+(and the same 2 / 5 split for the matching `ZTI` and `ZTS`). Step 2 now says the
+**definer count** decides, not the presence of a definition and not the
+`weak`/`external`/`non-external` attribute. The park stands unchanged — it was always a
+step-5 park — but the file is now the worked counterexample for the step it is *not*
+parked on.
