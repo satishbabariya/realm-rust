@@ -3378,3 +3378,62 @@ cannot fail because the driver is weak, and conflating them would hide the secon
 
 All four exported symbols are now exercised by one check or the other, except `verify`,
 which has nothing to exercise.
+
+---
+
+## 2026-08-09 — two parks, and a measurement that reorders the remaining candidates
+
+Parked `util/json_parser` #29 (0 of 7 symbols linked — unreachable, and independently the
+sole definer of `JSONParser::ErrorCategory`'s vtable) and `query_value` #30 (four
+`InvalidQueryArgError` throws, all owned by `TypeOfValue`'s parsing constructors, and
+transitively blocked on the parked `util/to_string` because the message goes through
+`util::format`). Both single-criterion, both quick.
+
+### Which remaining candidates the gate can actually judge
+
+The five clean candidates found behind the wall were treated as interchangeable. They are
+not. Breakpoints on the oracle across all five traces:
+
+| unit | queue # | trace hits | category |
+|---|---|---|---|
+| `array_blob` | 28 | 110 | byte-visible **and traced** — landed |
+| `array_blobs_small` | — | **50** (`insert` 46, `set` 4) | byte-visible **and traced** |
+| `array_blobs_big` | — | **10** (`add`) | byte-visible **and traced** |
+| `array_timestamp` | 32 | **0** | byte-visible, untraced |
+| `decimal128` | — | **0** | byte-visible, untraced |
+
+`array_timestamp` is next in queue order and is the *worst* of the four remaining by this
+measure: 264 lines, 14 strong symbols including six `find_first<Cond>` instantiations,
+and no gate coverage at all, so its differential would have to carry the whole burden.
+`array_blobs_small` and `array_blobs_big` are smaller, already exercised, and sit later
+in the queue only because `gen_queue.py` ranks by include depth then line count.
+
+This is the **seventh** unit where that ranking has pointed the loop somewhere worse than
+an available alternative, and the first where the misranking is not about dead code but
+about *evidence*: both units are live and portable, and one of them the gate can judge
+while the other it cannot.
+
+Sharpens the standing `gen_queue.py` proposal with a second column: alongside `linked`,
+a **`traced`** count — the number of the unit's symbols any trace actually reaches,
+measurable with the lldb breakpoint sweep used here. Sorting candidates by that would
+have put `array_blob`, `array_blobs_small` and `array_blobs_big` first, which is the
+order that maximises what `make verify` can prove.
+
+### The trace-schema gap, now load-bearing
+
+`migration/BOOTSTRAP-REPORT.md` and reflection #1 both recorded that the trace schema is
+scalar-only (int, string, double, bool) and that collections, links, Mixed, Timestamp and
+Decimal128 are unexercised — "a real coverage gap, and the first thing to extend once a
+unit touching them is queued". That moment has arrived twice over: `array_timestamp` and
+`decimal128` are both blocked from gate coverage by it.
+
+Adding a Timestamp/Decimal128 column to a trace would move both units from
+"byte-visible, untraced" to "byte-visible and traced", which is worth more than any
+differential. `harness/traces/` is permission-denied by design, so this is a human
+decision, recorded here rather than acted on.
+
+### Next unit
+
+`array_blobs_small`, deviating from queue order for the reason above and flagging it, as
+with `object_id` and `array_blob`. `array_timestamp` is not parked — it is portable and
+should be ported, just after the two units the gate can judge.
