@@ -3076,3 +3076,124 @@ Also worth recording against the three-consecutive-parks rule itself: it has now
 twice, and both times the parks were individually correct and the queue order was the
 real fault. The condition is doing its job; what it cannot do is distinguish "the queue is
 exhausted" from "the queue is mis-sorted", and those want opposite responses.
+
+---
+
+## 2026-08-09 — `array_blob.cpp` scoped: portable, **byte-visible AND traced**. Not started.
+
+Loop restarted by the human as `/loop 10m continue`, i.e. skipping the wall at queue
+positions 21–27 rather than reordering the queue. This is the first of the five clean
+candidates identified at the last stop.
+
+**This is only the second unit ever in the "byte-visible and traced" category**, after
+`array_unsigned`. Confirmed by breakpoint rather than inference:
+
+```
+lldb -o "breakpoint set -n 'realm::ArrayBlob::replace(...)'" -o run -- trace_runner <trace>
+  smoke          hit, frame #1 = realm::ArraySmallBlobs::insert(size_t, BinaryData, bool)
+  string_widths  hit, same caller
+  erase_churn    hit, same caller
+```
+
+Three of five traces reach it, through string storage. So `make diff-test` can genuinely
+judge this port — which is worth more than any amount of differential.
+
+### Screen: clean on all eight steps
+
+| step | result |
+|---|---|
+| 1 reachability | 14/14 realm symbols linked, payload live |
+| 2 `ZT*` definer counts | `ArrayBlob` 4, `Array` 24–34, `ArrayParent` 38 — **no sole-definer**, not a park |
+| 5 exceptions | 0 `throw`/`catch`/`try`, **no realm-owned EH site** |
+| 8 VTT (new) | 0 |
+
+### The obligation is four strong symbols
+
+Splitting `nm -m` by linkage, as `array_with_find` taught:
+
+```
+realm::Array::blob_replace(size_t, size_t, const char*, size_t, bool)
+realm::ArrayBlob::replace(size_t, size_t, const char*, size_t, bool)
+realm::ArrayBlob::get_at(size_t&) const
+realm::ArrayBlob::verify() const          <- body is entirely #ifdef REALM_DEBUG: empty here
+```
+
+Everything else it defines — both destructor variants, `calc_byte_len`, `calc_item_count`,
+`Array::get_child_ref`, `update_child_ref`, `translate_critical` — is weak and coalesced.
+
+And almost everything it *needs* is out-of-line and therefore callable: `Array::create`,
+`Array::insert`, `Array::init_from_mem`, `Array::destroy_children`,
+`Array::update_width_cache_from_header`, `Array::set`, `Array::blob_size`, `Node::alloc`,
+`Node::calc_byte_len`, `Node::calc_item_count`, `translate_less_critical`,
+`do_encryption_read_barrier`, `terminate`.
+
+### The one new ABI step: `Array` is multiply inherited
+
+`ArrayUnsigned` was 64 bytes with one vptr. `Array`/`ArrayBlob` are **112 bytes with
+two** — `Array : public Node, public ArrayParent`:
+
+```text
+*** class realm::ArrayBlob                              [sizeof=112, align=8]
+   0 | (Node vtable pointer)
+   8 |   char*        m_data
+  16 |   size_t       m_ref
+  24 |   Allocator&   m_alloc
+  32 |   size_t       m_size
+  40 |   ArrayParent* m_parent
+  48 |   unsigned     m_ndx_in_parent
+  52 |   bool         m_missing_parent_update
+  56 | (ArrayParent vtable pointer)          <- second base
+  64 |   Getter       m_getter               (16 B, a pointer-to-member)
+  80 |   const VTable* m_vtable
+  88 |   int64_t      m_lbound
+  96 |   int64_t      m_ubound
+ 104 |   uint8_t      m_width
+ 105 |   bool         m_is_inner_bptree_node
+ 106 |   bool         m_has_refs
+ 107 |   bool         m_context_flag
+```
+
+Measured vptr values, since `-fdump-vtable-layouts` emits nothing for a non-key-function
+TU (same obstacle as `array_unsigned`, same empirical workaround):
+
+```
+ArrayBlob: vptr0 = &_ZTVN5realm9ArrayBlobE[2]   vptr1 = &_ZTVN5realm9ArrayBlobE[10]
+Array:     vptr0 = &_ZTVN5realm5ArrayE[2]       vptr1 = &_ZTVN5realm5ArrayE[10]
+max_binary_size = 16777200   (0xFFFFF8 - 8)
+```
+
+Construction from Rust is therefore: zero 112 bytes, store the two vptrs, store the
+allocator pointer at 24. That reproduces `Array(Allocator&) : Node(allocator)` exactly —
+`m_data`, `m_size`, `m_parent`, `m_getter`, `m_vtable`, `m_width` all have
+zero/null default member initialisers; `m_ref`, `m_lbound`, `m_ubound` are left
+indeterminate by the C++ and nothing reads them before `init_from_ref`/`create` sets
+them, so zeroing is the same deliberate determinism choice made for `error_codes`'s pair
+padding.
+
+### The hot path constructs nothing
+
+Worth separating, because it means the traced path is much simpler than the unit:
+
+- `ArrayBlob::replace` common path — `blob_size()`, a header-bit read, `is_read_only()`,
+  `alloc(new_size, 1)`, two `memmove`s and an optional zero terminator. **No object
+  construction.** `Array new_root(m_alloc)` appears only when the blob exceeds ~16 MB.
+- The construction-heavy code is all cold: `Array::blob_replace`, `get_at`'s
+  context-flag branch, and that >16 MB branch.
+
+All-or-nothing still applies, so the cold paths must be written; but the part
+`diff-test` exercises does not depend on the multiple-inheritance work being right,
+which makes the failure modes separable.
+
+### Not started, and the next tick must land it or park it
+
+Nothing written, nothing committed, tree clean. This entry exists so the next iteration
+starts from measurements rather than re-deriving them.
+
+**Invoking reflection #3's rule against myself:** `array_unsigned` was scoped across two
+iterations before anyone wrote a line, and that was called out as the failure mode. This
+is scoping iteration **one** for `array_blob`, and everything that was ever a
+prerequisite — reachability, trace coverage, the four strong symbols, the 112-byte
+two-vptr layout, both vptr offsets, `max_binary_size`, and which paths construct
+objects — is now above. There is no remaining prerequisite. The next iteration writes
+the Rust or parks the unit with a diagnosis; a second scoping pass is the failure mode,
+not the work.
