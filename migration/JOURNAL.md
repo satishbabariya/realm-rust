@@ -1122,3 +1122,200 @@ reading the header.
 
 The port itself is still not started, for the reason given in the previous entry. What
 is now removed is its single largest source of silent corruption.
+
+---
+
+## 2026-08-09 — reflection #3 (three misread `nm` results become one rule; four iterations without a port)
+
+Covers `c6952f0` (reflection #2) through `cce001a`.
+
+**Units attempted: 2. Landed: 0. Parked: 1.** `column_binary.cpp` parked (#-, one of the
+three "clean" units). `array_unsigned.cpp` scoped across two iterations — screened,
+declared portable, record layout dumped — and **not started**. The other two commits in
+the window (`128101c`, `cce001a`) produced measurements, not units.
+
+**What `make verify` actually reported: nothing, in this window.** No unit landed, so no
+`verify` run was required or performed. The last exit-0 remains `599894a`, at
+`rust units ported = 6`, unchanged: determinism, diff-test, format-compat and
+fault-check all as at reflection #2. `ported_units.txt` still lists six units. The
+absence of a `verify` in a window is not itself a problem — parks and measurements do
+not need one — but it means the numbers below are inherited, not re-confirmed, and
+reflection #4 should say so if it happens again.
+
+### Convergence
+
+| | reflection #1 | reflection #2 | reflection #3 (today) |
+|---|---|---|---|
+| C++ TUs in `upstream/src/realm` | 230 | 230 | 230 |
+| Rust source files | 5 | 8 | 8 |
+| shim / extern-C boundary points | 12 | 33 | **33** |
+| units ported | 3 | 6 | 6 |
+| **boundary points per ported unit** | **4.0** | **5.5** | **5.5** |
+| `TODO(shim)` + `unimplemented!` | 0 | 0 | 0 |
+
+The boundary count did not rise. The loop's stop condition — "rises for two reflections
+running" — has **not** fired, and reflection #2's worry that the ABI tax on class-shaped
+units would keep inflating it is untested rather than refuted.
+
+The honest reading is that this row is uninformative this window: it is flat because
+nothing was ported, not because anything converged. A metric that only moves when units
+land cannot distinguish a healthy plateau from a stall. **Reflection #4 should read the
+boundary count against the number of units landed since #3; if that is still zero, the
+convergence check should be skipped as vacuous rather than reported as green.**
+
+### The pattern: three `nm` screen steps, three narrower questions than they appeared to answer
+
+`unit-screening.md` is built on `nm` because steps 1–4 cost a second each. Three separate
+loop iterations have now each misread one of those steps, in the same shape every time —
+**the command answers a narrower question than the screen treats it as answering, and the
+narrow answer and the wide answer differ in exactly the cases that matter.**
+
+| Iteration | Step | Read as | Actually means |
+|---|---|---|---|
+| `ac79027` (column_binary) | short `nm -u` | few dependencies, self-contained | dependencies were **inlined**, so they left the linker's view |
+| `cce001a` (array_unsigned) | empty `nm \| grep ZTV` | class is not polymorphic | this TU is not the **key-function TU**; `Node` has a vptr at offset 0 regardless |
+| today (below) | undefined `util::terminate` present | assertions are live in this build | `REALM_ASSERT*` are no-ops; the reference is from unconditional `REALM_ASSERT_RELEASE` / `REALM_UNREACHABLE` |
+
+Three occurrences across three iterations is well past the two-occurrence threshold, and
+the third was found by applying an existing rules-file sentence that is simply wrong. So
+this is promoted, in two places:
+
+- `.claude/rules/unit-screening.md` gains **"What each step does not tell you"**, giving
+  each `nm` step its narrow question, the wrong conclusion, and the disambiguating
+  second measurement. The steps themselves are unchanged — they were never the problem.
+- `.claude/rules/evidence-and-linkage.md`'s "Assertions and overflow" section had:
+  *"`REALM_ASSERT`/`REALM_ASSERT_EX` are no-ops in this build — confirmed by the absence
+  of an undefined `realm::util::terminate` in the objects."* The **conclusion is right**
+  and stays; the **stated confirmation is wrong** and is replaced with the flag evidence.
+  Downweighted, not deleted, per the reflection method.
+
+### The assertion finding, in full, because the next unit depends on it
+
+Measured, not assumed:
+
+- `build/oracle/CMakeCache.txt` has `REALM_ENABLE_ASSERTIONS:BOOL=OFF`, and
+  `CMAKE_CXX_FLAGS_RELEASE` is `-O3 -DNDEBUG` with no `REALM_DEBUG`. By
+  `util/assert.hpp:25-44`, that makes `REALM_ASSERT`, `REALM_ASSERT_EX`,
+  `REALM_ASSERT_DEBUG` and `REALM_ASSERT_3/7/11` all expand to
+  `static_cast<void>(sizeof bool(...))` — evaluated for type only, never executed.
+- **`REALM_ASSERT_RELEASE` and `REALM_UNREACHABLE()` are not under any `#if`**
+  (`assert.hpp:31` and `:99`). They always call `realm::util::terminate`.
+- **42 of the 67 `Storage` objects have `realm::util::terminate` undefined.** The
+  "absence of terminate" test would therefore have classified most of the library
+  wrongly. It was true of the units ported so far by luck of which ones they were.
+
+### Corrections to the `array_unsigned.cpp` scoping entry
+
+That entry is the input to the next session, so its errors are worth more than its
+successes. Two of its claims are wrong and one is incomplete:
+
+1. **"`m_width >= 8` is asserted on entry to `insert`, `erase` and `truncate`, so the
+   sub-byte packing paths do not apply."** All eight asserts in the file are
+   `REALM_ASSERT_DEBUG` (lines 27, 85, 87, 170, 176, 177, 217, 240) and are therefore
+   **no-ops in this build**. They constrain nothing at runtime and cannot be relied on
+   to narrow the port's scope.
+2. **The sub-byte paths do apply.** `lower_bound` and `upper_bound` each dispatch
+   explicitly on `m_width < 8` into `realm::lower_bound<0|1|2|4>` /
+   `realm::upper_bound<0|1|2|4>` (lines 109-123 and 145-159). `ArrayUnsigned` handles
+   0-, 1-, 2- and 4-bit elements. "A narrower scope than `Array`" was wrong.
+3. **Those templates are inlined.** `array_direct.hpp`'s `lower_bound<N>` appears
+   nowhere in `nm -u` — the whole undefined set is ten symbols and none of them is a
+   bound. So this unit has the *same* inlined-template dependency that got
+   `column_binary.cpp` parked, and the entry's claim that "everything expensive it does
+   is out-of-line" is only true of the `Node`/`Allocator` calls.
+
+   It is still not a park, and the distinction is the useful part: what
+   `column_binary` inlined was B+-tree traversal driven by a lambda, which Rust cannot
+   express against a C++ template; what `array_unsigned` inlines is **bit-unpacking
+   arithmetic**, which Rust reimplements directly. The criterion is not "does it inline
+   templates" — nearly everything in realm does — but **"can Rust reimplement what was
+   inlined, or must it call it?"**
+
+### A live hazard in `set_width`, confirmed from the disassembly
+
+```
+__ZN5realm13ArrayUnsigned9set_widthEh:
+    movl %esi, %ecx        ; width
+    negb %cl               ; -width, not 64-width
+    movq $-0x1, %rax
+    shrq %cl, %rax         ; hardware masks the count to 6 bits
+    movq %rax, 0x38(%rdi)  ; m_ubound  @ 56
+    movb %sil, 0x35(%rdi)  ; m_width   @ 53
+```
+
+`m_ubound = uint64_t(-1) >> (64 - width)` with `width == 0` is a shift of 64, which is
+UB in C++ and which clang has compiled to a hardware shift whose count is masked mod 64
+— so it yields `0xFFFF'FFFF'FFFF'FFFF`, not `0`. The `REALM_ASSERT_DEBUG(width > 0 || ...)`
+on the line above does not prevent it, being a no-op. In Rust with the workspace's
+`overflow-checks = true` this **panics**; it must be
+`u64::MAX.wrapping_shr(64u32.wrapping_sub(width as u32))`, which masks identically at
+both ends (`width = 64` → shift 0 → `MAX`, matching `negb`).
+
+Incidental corroboration: `0x38 = 56` and `0x35 = 53` are exactly where the
+`-fdump-record-layouts` entry put `m_ubound` and `m_width`. Two independent measurements
+of the layout now agree.
+
+### Blocked directory audit
+
+Nine entries, one added this window. **Nothing ported since reflection #2 unblocks any
+of them, because nothing was ported.**
+
+- **Seven** (`util/misc_ext_errors`, `util/random`, `util/enum`, `util/misc_errors`,
+  `util/cli_args`, `util/bson/regular_expression`, `util/memory_stream`) are the same
+  unreachability measurement seven times, all waiting on the same project-level
+  `REALM_ENABLE_SYNC` decision that hard rule 3 puts out of scope. Unchanged.
+- **`obj_list`** — still the cheapest first customer for the vtable/RTTI shim, and the
+  whole-population screen has since made that group 78 units rather than 4. Audit note
+  added.
+- **`column_binary`** — audit note added recording the sharper criterion above, so the
+  next reader does not conclude from it that any inlined template is a park.
+
+Nine parks with only one of them decided on ABI cost rather than reachability is not a
+loop dodging hard things — but see below, because the failure mode has changed shape.
+
+### Loop health: the stop conditions do not model the thing that is happening
+
+Four consecutive iterations have landed no unit. Not one of the loop's stop conditions
+fired, and each is individually correct not to have:
+
+| Iteration | Outcome | Stop condition that would apply |
+|---|---|---|
+| `128101c` | whole-population measurement | none — not a park |
+| `ac79027` | `column_binary` parked | park #1 of 3 |
+| `a70a9ec` | `array_unsigned` scoped, **not started** | none — not a park |
+| `cce001a` | `array_unsigned` layout dumped, **not started** | none — not a park |
+
+"Three consecutive parks" counts one. The two "analysed, not started" iterations are
+invisible to it. Both produced real, durable value — the 78-of-97 measurement redirected
+the whole plan, and the record layout removed a source of silent corruption — and both
+gave defensible reasons for stopping short. But *"the analysis is the expensive part and
+it is now done"* is a claim that can be made again indefinitely, and it has now been made
+twice in a row about the same unit.
+
+Stated plainly so reflection #4 can check it: **`array_unsigned.cpp` has been fully
+screened, declared portable, had its layout dumped from the compiler, had its assertion
+semantics and its one UB hazard characterised. There is no remaining prerequisite. The
+next iteration must either land it or park it with a diagnosis — a third analysis
+iteration on this unit is the failure mode, not the work.** Journalled as a proposal
+below rather than acted on, because the stop conditions live in `.claude/loop.md`.
+
+### What would most speed up the next session
+
+Port `array_unsigned.cpp`. Everything that was ever a prerequisite is now in the journal:
+the record layout (offsets 0/8/16/24/32/40/48/52/53/56, `sizeof = 64`), the differential
+shape (archive + link order), the fact that no vtable synthesis is needed, the sub-byte
+dispatch, the `wrapping_shr`, and the two live `REALM_UNREACHABLE()` calls at lines 120
+and 158 that must call `realm::util::terminate("Unreachable code", file, line)` rather
+than a Rust panic or `unreachable_unchecked`.
+
+It would also be the first unit whose bytes `make diff-test` can actually see, which is
+worth more to this project's confidence than any further screening of anything.
+
+### Deliberately not promoted
+
+The `set_width` shift-mask hazard, the `m_ubound` value, the `lower_bound<N>` inlining,
+and the 42-of-67 terminate count all stay in this entry. Each is one occurrence and all
+four are specific to this unit or this build configuration. The general lesson they
+share — take it off the build, not out of your head — is already the first line of
+`evidence-and-linkage.md`'s last section, and restating it would dilute rather than
+sharpen. The rules files are trusted in proportion to how rarely they churn.

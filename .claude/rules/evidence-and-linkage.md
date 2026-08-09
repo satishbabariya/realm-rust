@@ -127,8 +127,26 @@ Two traps confirmed on this machine:
 
 ## Assertions and overflow
 
-`REALM_ASSERT`/`REALM_ASSERT_EX` are no-ops in this build — confirmed by the absence of
-an undefined `realm::util::terminate` in the objects. So **release arithmetic can
-overflow exactly as the C++ does**, and the workspace sets `overflow-checks = true`,
+`REALM_ASSERT`, `REALM_ASSERT_EX`, `REALM_ASSERT_DEBUG` and `REALM_ASSERT_3/7/11` are
+no-ops in this build. The confirmation is the **build configuration**, not the objects:
+`build/oracle/CMakeCache.txt` has `REALM_ENABLE_ASSERTIONS:BOOL=OFF`,
+`CMAKE_CXX_FLAGS_RELEASE` is `-O3 -DNDEBUG`, and nothing defines `REALM_DEBUG`; by
+`util/assert.hpp:25-44` each of those macros then expands to
+`static_cast<void>(sizeof bool(...))`, evaluated for type and never executed.
+
+> **Corrected 2026-08-09 (reflection #3).** This paragraph previously said the no-op
+> status was "confirmed by the absence of an undefined `realm::util::terminate` in the
+> objects". That test is wrong and would misclassify most of the library:
+> `REALM_ASSERT_RELEASE` (`assert.hpp:31`) and `REALM_UNREACHABLE()` (`assert.hpp:99`)
+> sit under no `#if` and always call `realm::util::terminate`, so **42 of the 67
+> `Storage` objects have `terminate` undefined** while all of their `REALM_ASSERT*`
+> uses are dead. The conclusion held for the units ported so far by luck of which ones
+> they were. Read the flags, then grep the unit for `REALM_ASSERT_RELEASE` and
+> `REALM_UNREACHABLE` — those two must be reproduced in Rust as a call to
+> `realm::util::terminate(msg, file, line)`, not as a panic and not as
+> `unreachable_unchecked`.
+
+Because the gated asserts are dead, **release arithmetic can overflow exactly as the C++
+does**, and the workspace sets `overflow-checks = true`,
 which would panic where the C++ wraps. Use `wrapping_*` wherever you are mirroring
 arithmetic that upstream lets overflow, and say so in a comment.

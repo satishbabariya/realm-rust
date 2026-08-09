@@ -69,6 +69,46 @@ call. `utilities.cpp`'s `cpuid_init()` is called from `group.cpp:47`; had it bee
 static initialiser, removing the C++ TU would have left `sse_support`/`avx_support` at
 `-1` and silently changed code paths across the library.
 
+## What each step does **not** tell you
+
+Every step above is one `nm` invocation, which is why the screen is cheap. It is also
+why it keeps being over-read: each command answers a narrower question than the step it
+serves, and the narrow answer differs from the wide one in exactly the cases that
+matter. Three separate iterations have now been misled this way, each by a different
+step. When a step's answer is about to decide port-or-park, take the second measurement.
+
+| Step | Narrow question it answers | Wrong conclusion | Disambiguate with |
+|---|---|---|---|
+| 2 `grep ZTV\|ZTI\|ZTS` | is this the **key-function TU**? | "the class is not polymorphic, so the layout is what the header says" | `clang -Xclang -fdump-record-layouts`. `array_unsigned.cpp.o` has no `ZT*` symbol, yet `Node` has a vptr at offset 0 and every field is shifted 8 bytes |
+| 3 `nm -u` (short list) | what must the **linker** still resolve? | "few dependencies, therefore self-contained" | read the body. Templates, lambdas passed to templates, and inline members of other realm classes were compiled in, not linked — they leave `nm -u` entirely (`column_binary.cpp`: 4 undefined symbols, unportable) |
+| 3 `nm -u` shows `util::terminate` | does any **unconditional** assert survive? | "assertions are live in this build" | `assert.hpp` + the cache. `REALM_ASSERT_RELEASE` and `REALM_UNREACHABLE()` are under no `#if` and always call `terminate`; `REALM_ASSERT*` are separately gated. 42 of 67 `Storage` objects reference `terminate` |
+| 3 `nm -u` shows `__cxa_begin_catch`, `__gxx_personality_v0` | is there **EH machinery**? | "this unit throws, park it per step 5" | `grep -c throw`. A `noexcept` function that calls anything non-`noexcept` gets a landing pad that calls `std::terminate`. `array_unsigned.cpp` has both symbols and zero `throw` |
+
+Step 2's failure is the expensive one: an empty `ZT*` result means no vtable has to be
+*synthesized*, which is a real and useful answer, but says nothing about whether the
+objects the unit manipulates have a vptr in them. Those are different questions and the
+second one silently shifts every field offset in the Rust view.
+
+Step 3's two failures are the same shape from opposite directions — a symbol's absence
+and a symbol's presence both mean less than they look like. The general form:
+**`nm` describes what survived to the link, and inlining, macro expansion and
+`noexcept` landing pads all move code across that boundary without changing what the
+unit does.**
+
+### The inlining question is not binary
+
+"Does this unit inline templates?" is the wrong test — nearly every unit in realm does.
+The test that separates the two cases seen so far is **what** was inlined:
+
+- `column_binary.cpp` inlined B+-tree traversal driven by a lambda handed to a C++
+  function template. Rust cannot express that against a template, and cannot call it.
+  **Parked.**
+- `array_unsigned.cpp` inlines `realm::lower_bound<0|1|2|4>` — bit-unpacking arithmetic
+  from `array_direct.hpp`. Rust reimplements it directly. **Portable.**
+
+Ask: *can Rust reimplement what was inlined, or must it call it?* Only the second is a
+park.
+
 ## Layout is not the port's to choose
 
 For any class-shaped unit, the member layout is fixed by the header that every *other*
