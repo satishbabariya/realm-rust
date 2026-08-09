@@ -714,3 +714,49 @@ a short, self-contained undefined list means single-object linking; anything pul
 
 - `nm -u <object>` before choosing the differential shape.
 - `nm -g <object>` and provide every exported symbol, not the ones the header implies.
+
+---
+
+## 2026-08-09 — `obj_list.cpp` parked: line count is not a proxy for ABI difficulty
+
+25 lines. Body is `ObjList::~ObjList() {}` and nothing else. Zero `throw`. No STL in any
+signature. Live and reachable. It passed every screen that has been working so far, and
+it is one of the harder units in the queue.
+
+`ObjList` has a virtual destructor, so this TU is its **key-function TU**: the compiler
+emits `_ZTVN5realm7ObjListE` (vtable), `_ZTIN5realm7ObjListE` (typeinfo) and
+`_ZTSN5realm7ObjListE` (typeinfo name) here and nowhere else, with `__cxa_pure_virtual`
+in the vtable slots for its pure virtuals. Nine exported symbols from three lines of
+code. Removing the TU removes the vtable of a polymorphic base other units subclass.
+
+### The screen was missing a step
+
+Add, and run it *before reading the source*:
+
+```
+nm <unit>.o | grep -E "ZTV|ZTI|ZTS"
+```
+
+Any hit means the unit carries a class's vtable and RTTI, and porting it requires
+synthesizing both. Full screening order now:
+
+1. reachability — unit `.o` symbols ∩ linked binary (is the gate able to see it?)
+2. **`nm | grep -E "ZTV|ZTI|ZTS"` — does it own a vtable?**
+3. `nm -u` — how big is the undefined set? (also picks the differential shape)
+4. `nm -g` — every exported symbol, including C1/C2 and D0/D1/D2 variants
+5. `grep -c throw`
+6. STL-by-value returns
+
+Steps 1–4 are all `nm` on one object and cost about a second. Steps 5–6 need the source.
+Three of the last five units examined were rejected at step 2, 5 or 6 — the screen earns
+its keep.
+
+### The vtable-shim group is now four units
+
+`misc_ext_errors` (parked), `basic_system_errors` (#8), `error_codes` (#13), and now
+`obj_list` (#15) all need the same vtable + RTTI synthesis. That is a stronger argument
+for building it once, deliberately, than any of them made alone.
+
+`obj_list` is probably the right *first* customer if it is ever built: `__class_type_info`
+with no base class is the simplest RTTI shape in the group, and its destructors are
+empty, so the vtable layout is the only thing under test.
