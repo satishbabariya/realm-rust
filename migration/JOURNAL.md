@@ -591,3 +591,74 @@ than subtly.
 - Screen candidates with: live symbols, then `grep -c throw`, then a look for
   STL-by-value returns. Two of the three units examined this tick failed on the second
   or third test.
+
+---
+
+## 2026-08-09 — `utilities.cpp` ported; first data symbols and first member function
+
+`make verify` exit 0 at `rust units ported = 5`;
+`migration/checks/run_utilities_differential.sh` passes on 108 probe lines.
+
+Nine live symbols, and the first unit that exports things other than free functions:
+two mutable globals, one C++ member function, and one struct-by-value parameter.
+
+### Format decisions found
+
+- **`platform_timegm` truncates to 32 bits.** The body is
+  `int64_t(static_cast<int32_t>(timegm(&time)))`, so anything past 2038-01-19 03:14:07
+  wraps negative. Mirrored exactly. The differential pins it with cases at
+  INT32_MAX, INT32_MAX+1, 2050 and 2100 — a port returning the full 64-bit `time_t`
+  agrees on every case before the wrap and diverges on every case after it.
+- **`fastrand`'s modulus special-cases `max == UINT64_MAX`.** `max + 1` overflows to 0
+  and the C++ substitutes `0xffff…f`. Defined behaviour in C++ (unsigned), a debug
+  panic in Rust, so it is written against `checked_add`.
+- **`cpuid_init` always sets `avx_support = -1` under clang.** The AVX probe sits behind
+  `#if !defined __clang__ && …`. Reproducing the *guarded-out* branch matters: a hybrid
+  reporting AVX where the oracle does not would take different paths in every TU that
+  inlines `cpu_avx<>()`.
+- **`fast_popcount32` is a 256-entry byte-table sum, not an intrinsic** — upstream
+  disabled the intrinsic deliberately. `count_ones()` is used instead of transcribing
+  the table: the two are equal by construction, and hand-copying 256 numbers is the
+  more likely source of an error. The differential sweeps signed, unsigned and boundary
+  values to confirm.
+
+### Exporting data symbols and a member function
+
+`sse_support` / `avx_support` are `signed char` globals read by `cpu_sse<>()` inlined
+into many other TUs, so they must exist as byte-identical data symbols:
+`#[export_name = "_ZN5realm11sse_supportE"] pub static mut SSE_SUPPORT: i8 = -1`, written
+through `addr_of_mut!`. `FastRand::operator()` is a member function on
+`class FastRand { uint64_t m_state; }` — one member, so `this` is simply `*mut u64`.
+
+`cpuid_init()` is called explicitly from `group.cpp:47`, not from a static initialiser,
+so replacing this TU does not change when the globals get set. That was worth checking
+before writing anything: had it been a static-init call, removing the C++ TU would have
+left both globals at -1 and silently changed code paths across the library.
+
+`realm::util::Mutex::~Mutex()` is emitted here as `weak private external` and defined in
+no other object in the archive. Nothing outside the TU references it, so the Rust port
+does not provide it — confirmed by the hybrid linking clean.
+
+### The differential had to change shape
+
+Single-object linking, which base64 / string_data / sha_crypto all use, does not work
+here: `utilities.cpp`'s file-static `util::Mutex` drags in `Mutex::*_failed` from
+`thread.cpp`, which drags in `terminate.cpp` and `backtrace.cpp`. Linking that chain
+object-by-object is a losing game.
+
+Both drivers now link the whole `librealm.a`, and the Rust driver puts its staticlib
+**first** — the same link-order mechanism `make hybrid` relies on. The guard changes
+accordingly: instead of "is the Rust archive present", it asks whether the C++ object
+was *extracted*, using `a_popcount_bits` (utilities.cpp's anonymous-namespace table) as
+the fingerprint. Absent in the Rust driver, present in the C++ one.
+
+This is the more robust pattern and should be preferred from here on: it does not care
+how many other TUs a unit depends on, and it tests the exact mechanism the hybrid uses.
+
+### For the next unit
+
+- Prefer the archive + link-order differential over single-object linking. Find an
+  anonymous-namespace symbol in the unit first to use as the fingerprint; if the unit
+  has none (as `string_data.cpp` did), fall back to the crate probe.
+- Screening order that has now worked twice: live symbols → `grep -c throw` → STL
+  by-value returns → check for static-initialiser dependencies.
