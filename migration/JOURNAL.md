@@ -1391,3 +1391,84 @@ iteration is evidence for it: the queue keeps producing units that are individua
 reasonable and collectively blocked on the same missing shim. **The next iteration should
 build the shim, not pick the next unit off the queue** — the queue is ordered by
 dependency depth and size, and neither predicts the thing that is actually gating.
+
+---
+
+## 2026-08-09 — `util/basic_system_errors.cpp` parked; the step-2 test corrected in both directions
+
+Queue #8, the first unit neither ported nor blocked. Reachable — 5 defined symbols, all
+5 in `build/oracle/trace_runner` — and parked on the vtable/RTTI shim, which is what
+step 2 of `unit-screening.md` says to park for. ~25 minutes. Details in
+`migration/blocked/util-basic_system_errors.md`.
+
+Two exported functions sit on top of an anonymous-namespace `std::error_category`
+subclass. Supplying them from Rust means synthesizing a 7-slot vtable (three of whose
+slots must point at libc++'s own `error_category` implementations), an
+`__si_class_type_info` with its name string, a `std::string` returned by value, and a
+`__cxa_guard`-protected function-local static. That is the shim, not a unit.
+
+### The correction that matters more than the park
+
+**Step 2's test is wrong in both directions, and I got it wrong a third way.**
+
+The rule says `nm $OBJ | grep -E "ZTV|ZTI|ZTS"`. I screened with `nm -g`. Both are
+broken, for opposite reasons:
+
+| Form | Misses | Because |
+|---|---|---|
+| `nm -g $OBJ \| grep __ZT` | **local** vtables | `-g` lists only external symbols. An anonymous-namespace class emits its vtable/typeinfo as `non-external`, so this reports zero for `basic_system_errors`, which emits three |
+| `nm $OBJ \| grep ZTV\|ZTI\|ZTS` (the rule) | nothing, but **false-positives** | it also matches `U __ZTV…` — a *reference*, meaning the unit merely constructs a polymorphic object. Six units in the first 34 trip this |
+
+The form that is right in both directions is **`ZT*` the unit defines, local or
+external**:
+
+```
+nm $OBJ | grep -v ' U ' | grep -E '__ZT[VIS]'
+```
+
+Proposed for `unit-screening.md` at reflection #4, alongside the inline-base-helper step
+proposed last iteration. Note the shape: this is the same lesson as the three already
+tabulated there — **`nm`'s answer depends on a flag whose effect is invisible in the
+answer** — which is now four occurrences and arguably wants promoting from a table row
+to the section's opening claim.
+
+### What the corrected screen changes about the queue
+
+Re-run over the first 34 units, `DEF`/`LNK` = defined symbols and how many reach the
+linked oracle:
+
+| unit | DEF | LNK | defines ZT* | throw | verdict |
+|---|---|---|---|---|---|
+| `util/basic_system_errors` #8 | 5 | 5 | **3** | 0 | parked this iteration |
+| `util/backtrace` #10 | 20 | 20 | 0 | 0 | candidate |
+| `error_codes` #13 | 17 | 17 | **0** | 0 | candidate |
+| `status` #17 | 8 | 8 | 0 | 0 | candidate |
+| `object_id` #25 | 12 | 12 | 0 | 0 | candidate |
+| `util/to_string` #27 | 19 | 19 | 0 | 0 | candidate |
+| `util/terminate` #34 | 13 | 13 | 0 | 0 | candidate |
+| `version` #19 | 15 | 9 | 0 | 0 | candidate, partial linkage |
+| `util/compression` #14 | 35 | 13 | 10 | 5 | park: emits vtables |
+| `impl/output_stream` #21, `array_blob` #28, `array_timestamp` #32, `util/time` #16, `util/demangle` #18, `util/timestamp_formatter` #33, `array_with_find` #22 | — | — | 3–16 | — | park: emit vtables |
+| `util/resource_limits` #23, `util/json_parser` #29 | 4 / 10 | **0** | — | — | park: unreachable |
+
+**`unit-screening.md` currently names `error_codes` (#13) as one of four units gating on
+the vtable shim. That is wrong** — it defines no `ZT*`, all 17 symbols link, and it does
+not throw. Corrected in the park file and here.
+
+So the shim gates less of the near queue than the last measurement implied, and there are
+**seven** candidate units ahead of it. That is the useful output of this iteration: the
+next tick has somewhere to go that is not the shim.
+
+### Loop health
+
+Two consecutive parks (`array_unsigned`, then this one). The stop condition is three, so
+it has not fired, and I do not think it should be pre-empted: both parks were decided at
+step 2 of the screen on measured evidence, and the corrected screen above says the third
+unit will *not* be a park. If `util/backtrace` (#10) also parks, that is three and the
+loop should stop and reconsider queue order.
+
+Standing recommendation from last iteration is unchanged and now better supported: the
+ref-translation + vtable/RTTI shim is the highest-value next piece of work, and it is not
+a queue unit. But with seven clean candidates ahead of it, the queue is no longer
+*blocked* on it — which was the argument for building it immediately. Landing a couple of
+those first is the cheaper order.
