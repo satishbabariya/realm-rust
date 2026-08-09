@@ -3621,3 +3621,82 @@ beyond "nothing else regressed", and its differential carries the whole burden.
 That makes the trace-schema extension recorded last iteration more valuable rather than
 less: it is now the difference between the gate judging the next several units and not.
 Still `harness/traces/`, still the human's call, still recorded rather than acted on.
+
+---
+
+## 2026-08-09 — `array_timestamp.cpp` measured: portable, untraced. Not started.
+
+Queue #1 under the new ordering. Screened clean on all eight steps — 55/55 linked, no
+sole-definer `ZT*`, zero throws with no realm-owned EH site, zero VTT — and **untraced**,
+so its differential carries the whole burden.
+
+### The one judgement call, and the rule that decided it
+
+`ArrayTimestamp` delegates almost everything to two sub-arrays, and the methods it calls
+on `m_seconds` (an `ArrayIntNull`) split cleanly:
+
+| bindable (out-of-line) | not bindable (inline) |
+|---|---|
+| `find_first`, `find_first_in_range`, `init_from_parent`, `init_from_ref`, `set_parent`, `move`, `get_any`, `create_array`, **`avoid_null_collision`** | `get`, `size`, `insert`, `set`, `set_null`, `is_null`, `erase`, `clear` |
+
+Eight inline methods with no out-of-line definition anywhere is exactly the shape that
+made me nearly park `array_blob`, so this time I read the bodies first. They are
+one-to-three-liners over an index-plus-one offset and a sentinel:
+
+```cpp
+size()      -> Array::size() - 1
+null_value()-> Array::get(0)                      // element 0 holds the sentinel
+get(ndx)    -> v = Array::get(ndx+1); v == null_value() ? none : some(v)
+set(ndx, v) -> v ? (avoid_null_collision(*v), Array::set(ndx+1, *v))
+                 : Array::set(ndx+1, null_value())
+erase(ndx)  -> Array::erase(ndx + 1)
+clear()     -> Array::truncate(0); Array::add(0)
+```
+
+The only genuinely hard part — picking a new sentinel when a stored value collides with
+it, and rewriting the array — is `avoid_null_collision`, and that **is** bindable. So
+this is not `ArrayIntNull` infrastructure smuggled into a timestamp unit; it is a
+documented encoding expressed in six lines. The rule from the `array_blob` entry —
+*"no out-of-line definition is not the same as must build infrastructure; ask what the
+inline body actually is"* — earned its keep a second time.
+
+Contrast `array_blobs_big`, parked the same iteration: there the missing inline body was
+B+-tree leaf insertion with splitting and rebalancing. The test is the *content* of the
+body, not its absence from the symbol table.
+
+### Measurements, so the next iteration re-derives nothing
+
+**A third multiple-inheritance shape.** `ArrayTimestamp : public ArrayPayload, public
+Array`, and `ArrayPayload` is the *primary* base, so the `Array` subobject starts at **8**
+— unlike the blob units where `Array` was primary and sat at 0.
+
+```text
+   0 | (ArrayPayload vtable pointer)
+   8 |   class realm::Array          the 112-byte base, its own two vptrs at +8 and +64
+ 120 |   ArrayIntNull  m_seconds
+ 240 |   ArrayInteger  m_nanoseconds
+       [sizeof = 360]
+```
+
+Bindability of the remaining `Array` operations:
+
+| symbol | out-of-line definitions |
+|---|---|
+| `Array::truncate(size_t)` | 1 — bindable |
+| `Array::erase(size_t, size_t)` | 0 — reimplement |
+| `Array::add(int64_t)` | 0 — already reimplemented in `array_blob.rs` |
+
+The six `find_first<Cond>` symbols are **explicit specialisations declared in the header
+and defined in this `.cpp`** — this unit's own code, one loop each over the two
+sub-arrays with a different comparator, not template machinery to instantiate.
+
+### Not started
+
+14 strong symbols, 360-byte object, a third inheritance shape, and no trace coverage, so
+the differential must cover all of it. Starting that at the tail of a long iteration is
+the mistake avoided with `array_blobs_small`, which was measured in one iteration and
+landed in the next.
+
+Same commitment as then, and the same rule invoked against myself: everything that was
+ever a prerequisite is above. **The next iteration lands it or parks it; a second
+measuring pass is the failure mode.**
