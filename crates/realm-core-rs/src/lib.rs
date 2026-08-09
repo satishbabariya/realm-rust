@@ -30,6 +30,7 @@ pub mod object_id;
 pub mod status;
 pub mod string_data;
 pub mod utilities;
+pub mod unicode;
 pub mod util;
 
 /// Presence probe for the hybrid build.
@@ -44,7 +45,7 @@ pub mod util;
 /// enforces that, so the two cannot drift.
 #[no_mangle]
 pub extern "C" fn realm_rs_units_ported() -> u32 {
-    13
+    14
 }
 
 #[cfg(test)]

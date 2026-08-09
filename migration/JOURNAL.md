@@ -374,7 +374,10 @@ buffers to catch a stray sign extension.
 - `unicode.cpp:324` calls `matchlike_ins(text, lower, upper)` while the parameters are
   named `(text, pattern_upper, pattern_lower)`. Argument names disagree with the call.
   Not this unit's problem — the port mirrors the signature — but worth knowing before
-  porting `unicode.cpp`.
+  porting `unicode.cpp`. **Followed up when `unicode.cpp` was ported: the swap is real
+  and behaviourally inert**, because `matchlike` compares each pattern character against
+  both foldings. A negative control that removes it cannot be detected. See the
+  `unicode.cpp` entry.
 
 ### Queue
 
@@ -3794,3 +3797,130 @@ line. It did land, so the commitment held in outcome, but the failure mode it na
 happened anyway and was only noticed partway through. For a unit this size the measuring
 is not avoidable; what is avoidable is calling the previous iteration "measured" when it
 had not yet enumerated the symbols it would need.
+
+---
+
+## `upstream/src/realm/unicode.cpp` — 2026-08-09
+
+Ported. `make verify` exit 0 at **rust units ported = 14**.
+`migration/checks/run_unicode_differential.sh` PASS on 1,533 probe lines.
+
+Nine exports: `sequence_length`, `utf8value`, both `case_map` overloads,
+`equal_case_fold`, `search_case_fold`, `contains_ins`, and both `string_like_ins`
+overloads.
+
+### Observability
+
+**Byte-invisible and untraced.** Query-side case folding; nothing here reaches a
+`.realm`, and an `AtomicUsize` probe on all nine exports reports **zero** hits across
+all five traces. `make verify` proves the link is intact and that nothing else
+regressed. The differential is the entire evidence.
+
+Unusually, that is not a weakness here: **every function in this unit is pure**, which
+let the coverage be exhaustive rather than sampled.
+
+- all 256 lead bytes through `sequence_length`
+- all 256 single bytes through `case_map`, both directions — which also sweeps the whole
+  malformed-lead space in one pass (`0x80..0xBF` bare continuations, `0xC0..0xFF`
+  truncated leads, all of which must come back `none`)
+- every `0xC2`/`0xC3` lead × every continuation — the entire folded Latin-1 range
+- every well-formed 1- and 2-byte sequence through `utf8value`
+
+This is the first unit where "untraced" did not mean "sampled". Worth reaching for when
+the unit is pure: enumerate the input domain instead of choosing representatives.
+
+### The differential earned itself on the first run
+
+`contains_ins` computes `p - needle_size + 1` on `size_t`. C++ evaluates left to right:
+at the first iteration `p == needle_size - 1`, so `p - needle_size` wraps to `SIZE_MAX`
+and the `+ 1` wraps it back to `0`. Two overflows that cancel, and benign in C++.
+
+The workspace sets `overflow-checks = true`, so the plain subtraction **panicked**.
+Mirrored as the same two wraps rather than rewritten as the equivalent `p + 1 - n`:
+
+```rust
+let start = p.wrapping_sub(needle_size).wrapping_add(1);
+```
+
+This is exactly the case `evidence-and-linkage.md` warns about under "Assertions and
+overflow", and it is the first time it has actually bitten. The rewrite `p + 1 - n` is
+arithmetically identical here and would have been fine — but it is only identical
+because `p + 1` cannot itself overflow, which is a fact about this loop, not about the
+expression. Mirroring costs nothing and does not need that argument.
+
+### `resize` was measured and then deliberately not used
+
+`case_map` opens with `result.resize(source.size())`, so the returned `std::string`'s
+**capacity** is observable and had to match. libc++'s rule for `resize` on an empty
+string is *not* the one measured for `object_id`'s `(ptr, n)` constructor. Measured on
+this machine (`scratchpad/resize_cap.cpp`):
+
+| `n` | capacity |
+|---|---|
+| 0..22 | 22 (short, SSO) |
+| 23..47 | 47 |
+| >= 48 | `round_up(n + 1, 8) - 1` |
+
+Then not used. `std::string::append(size_t, char)` is undefined in the object and is
+exactly what `resize` calls to grow, so binding it gives libc++'s behaviour with no
+formula to get wrong:
+
+```rust
+#[link_name = "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6appendEmc"]
+fn string_append(this: *mut StdString, n: usize, c: c_char) -> *mut StdString;
+```
+
+**The general rule this confirms: prefer binding libc++'s own function to mirroring its
+growth policy.** A mirrored policy is a second copy of a rule that can drift with the
+toolchain; a bound symbol cannot. The measurement stays recorded above for the next unit
+that must *construct* a string rather than *grow* one — that path has no bindable
+equivalent, so the formula is still needed there.
+
+### `#[repr(C, align(8))]` on the string wrapper
+
+`util::Optional<std::string>` is 32 bytes: the string at 0, the engaged flag at 24, and
+7 bytes of tail padding. Declaring the wrapper as `#[repr(C)] struct StdString { rep:
+[u8; 24] }` gives it **alignment 1**, which makes `OptString` 25 bytes and shifts
+everything the sret pointer writes. `align(8)` is load-bearing:
+
+```rust
+#[repr(C, align(8))] pub struct StdString { rep: [u8; 24] }
+```
+
+A `const_assert` on `size_of::<OptString>() == 32` catches this at compile time and
+should be on every one of these wrappers.
+
+### Negative controls: two bite, one cannot
+
+| Control | Result |
+|---|---|
+| Latin-1 fold boundary off by one (`0xFE` → `0xFD`) | **caught**, exit 1 |
+| one wrong entry in the 256-byte `sequence_length` table (`0xFE` → 2) | **caught**, exit 1 |
+| remove the upper/lower argument swap in `string_like_ins` | **not caught**, exit 0 |
+
+The third is recorded rather than papered over, and it is the `array_blob` NC2 case
+rather than the `array_timestamp` NC3 case — **unreachable by construction, not a
+coverage gap.** `string_like_ins(text, upper, lower)` calls `matchlike_ins(text, lower,
+upper)`, passing `lower` into the parameter named `pattern_upper`. The swap is real in
+the source, but `matchlike` compares each pattern character against *both* foldings, so
+the two arguments are interchangeable and **no input can distinguish them**. No driver
+strengthening would make this control bite; the port preserves the swap anyway, because
+"inert today" is a property of `matchlike`, not of this call site.
+
+The module comment originally described the swap as significant. Corrected — a comment
+that overstates a constraint is the kind of thing the next porter mirrors without
+re-measuring.
+
+### Screening note: step 5's grep counts comments
+
+`grep -cE '\b(throw|catch|try)\b' unicode.cpp` reports **1**, and the single hit is the
+word "catch" inside a comment. The step-5 rule already says to follow the grep with the
+owning-function test, which clears the unit — but the grep's first output was a false
+alarm, and it will be for any unit whose prose mentions catching. Read the hit before
+acting on the count.
+
+### Time
+
+About 2.5 hours, roughly half of it on the exhaustive driver and the `case_map`
+capacity question — of which the capacity half was, in the end, answered by deleting the
+work rather than finishing it.
