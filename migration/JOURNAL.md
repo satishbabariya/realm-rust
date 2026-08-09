@@ -2056,3 +2056,107 @@ the two-occurrence threshold the reflect method already states.
 - **Nothing in `harness/`, the `Makefile`, `upstream/`, `CLAUDE.md`, `.claude/loop.md`,
   `.claude/settings.json` or `.claude/hooks/`.** Two things I would change if they were
   mine are proposals #4 and #5 above.
+
+---
+
+## 2026-08-09 — `error_codes.cpp` ported. Tables generated from the oracle, deliberately.
+
+`make verify` exits 0 at `rust units ported = 8`.
+`migration/checks/run_error_codes_differential.sh` exits 0 on 3,863 probe lines.
+~45 minutes. Ported concurrently with reflection #4, which was running in a fork; the
+two touched disjoint files.
+
+This is the unit reflection #4's refuted rule would have parked. Screening it with the
+corrected step 5 — `grep -cE '\b(throw|catch|try)\b'` is 0, and every EH site in the
+object is owned by an inlined libc++ weak helper — cleared it in about a minute.
+
+### The tables were generated from the oracle, and that is a real trade
+
+`error_codes.cpp` is 512 lines of two lookup tables: a 160-entry name→code array sorted
+by name, and a ~400-line `switch` mapping code→category bits. Rather than re-type them,
+I linked a generator against `librealm.a` and read them out of
+`ErrorCodes::get_error_list()` and `ErrorCodes::error_categories()`.
+
+**Stated plainly because it cuts both ways:** the Rust table is *derived from the
+implementation it replaces*, so this port cannot independently confirm the table is
+right — only that it is the same. For a pure lookup table that is exactly the property
+byte-identity needs, and hand-transcribing 160 rows plus 400 case labels would trade a
+guaranteed-faithful copy for an error-prone one. It does change what the differential is
+for: transcription error is impossible, so the live risk is a **stale or truncated
+generation**, and that is what the row-by-row comparison catches. Both negative controls
+were chosen for that: one wrong category bit (caught, 4 diverging lines) and one dropped
+table row (caught).
+
+Completeness of the category switch is not assumed. Probed every code in `0..=4_000_000`
+— the largest table code is `1_000_000` — plus negatives and both `int` extremes:
+**exactly two** codes outside the name table have non-default categories (1045 and 1046,
+both `8196`, both still `"unknown"` from `error_string`). Everything else returns 0 /
+`"unknown"`.
+
+### `from_string` has two load-bearing halves
+
+```cpp
+auto it = std::lower_bound(begin, end, name, [](auto& ec_pair, auto name) {
+    return strncmp(ec_pair.name, name.data(), name.size()) < 0;   // NEEDLE's length
+});
+if (it != end && it->name == name) return it->code;               // exact check
+return ErrorCodes::UnknownError;
+```
+
+The comparator compares only `needle.size()` bytes, so **every proper prefix of a table
+entry compares equal during the search** and is rejected only by the exact equality
+check afterwards. `from_string("AWS")` finds `"AWSError"` and then returns
+`UnknownError`. A port that used a normal string comparison in the search would agree on
+every hit and disagree on some misses. The differential probes every proper prefix of
+all 160 entries for this reason — that is most of its 3,863 lines.
+
+`ErrorCodes::UnknownError` is `2000000` and is **not** in the name table, so
+`error_string(UnknownError)` is `"unknown"` and its category is 0.
+
+### ABI, measured
+
+| C++ type | layout | passing |
+|---|---|---|
+| `ErrorCodes::Error` | `int` | `edi` / `eax` |
+| `ErrorCategory` | one `unsigned m_value` | 4 B, returned in `eax` |
+| `std::string_view` | `{const char*, size_t}` | 16 B, 2 GPRs |
+| `std::pair<string_view, Error>` | `first`@0, `second`@16, `sizeof = 24` | — |
+| `std::vector<T>` | `{begin, end, cap}` | 24 B, **sret** |
+
+Three functions return a `std::vector` by value that C++ then destroys, so the buffers
+come from `operator new` and the **capacity has to match what `push_back` would have
+produced**. The oracle reports `size=160 cap=256` for all three. `push_back_capacity()`
+replays libc++'s `__recommend(size+1) = max(2*cap, size+1)` rather than using
+`next_power_of_two()`, which agrees at 160 and is a different function.
+
+`operator<<(ostream&, Error)` is `stream << error_string(code)`, and
+`operator<<(ostream&, string_view)` in libc++ is exactly
+`__put_character_sequence(os, data, size)` — bound directly. It is
+`weak private external`, which the `array_unsigned` entry already established is
+linkable.
+
+### A better link guard than the last unit had
+
+`array_unsigned` had no file-static to fingerprint, so its differential fell back to the
+crate-probe proxy plus an address-distance heuristic. This unit has a real one:
+`realm::string_to_error_code`, the 160-entry table, is a local symbol emitted only by
+`error_codes.cpp.o`.
+
+```
+nm build/oracle/trace_runner | grep -c string_to_error_code   -> 1
+nm build/hybrid/trace_runner | grep -c string_to_error_code   -> 0
+```
+
+Present in the oracle, absent from the hybrid. That is a direct test of "the C++ object
+was not extracted", and the differential asserts it in both directions.
+
+### Assumptions
+
+- The 4 tail padding bytes of `pair<string_view, Error>` are zeroed here; C++ leaves
+  them indeterminate. Nothing reads them and the differential compares fields, not raw
+  memory. A deterministic value is preferable to reproducing "indeterminate".
+- `operator new` is declared `extern` a second time in this module rather than shared
+  with `util::base64`. Two declarations of one symbol are harmless; a shared `cxx_abi`
+  module is a refactor that should be done once for all units, not smuggled into a port.
+- `panic = "abort"` means `std::bad_alloc` from the three vector allocations aborts
+  rather than propagating. Same divergence `base64` documented.

@@ -21,6 +21,8 @@
 
 pub mod array_unsigned;
 pub mod disable_sync_to_disk;
+pub mod error_codes;
+mod error_codes_table;
 pub mod string_data;
 pub mod utilities;
 pub mod util;
@@ -37,7 +39,7 @@ pub mod util;
 /// enforces that, so the two cannot drift.
 #[no_mangle]
 pub extern "C" fn realm_rs_units_ported() -> u32 {
-    7
+    8
 }
 
 #[cfg(test)]
