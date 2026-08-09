@@ -3700,3 +3700,97 @@ landed in the next.
 Same commitment as then, and the same rule invoked against myself: everything that was
 ever a prerequisite is above. **The next iteration lands it or parks it; a second
 measuring pass is the failure mode.**
+
+---
+
+## 2026-08-09 — `array_timestamp.cpp` landed; and upstream picks a null sentinel from a stack address
+
+`make verify` exits 0 at `rust units ported = 13`.
+`migration/checks/run_array_timestamp_differential.sh` exits 0 on 191 probe lines.
+Landed in the iteration after it was measured, as committed — though see the note on
+process at the end, because that commitment was nearly broken.
+
+### Nine vtable pointers across three objects
+
+A third multiple-inheritance shape, and the most involved construction so far.
+`ArrayTimestamp : public ArrayPayload, private Array` — `ArrayPayload` is the *primary*
+base, so the `Array` subobject starts at **8**, unlike the blob units where it sat at 0.
+Both sub-arrays are themselves multiply inherited (`ArrayIntNull : public Array, public
+ArrayPayload`, 120 bytes, vptrs at 0 / 56 / 112). Constructing one writes nine vptrs and
+wires both sub-arrays' parents to the container's `ArrayParent` subobject at +64.
+
+Note `private Array`: `get_mem()` and `destroy()` are inaccessible from outside, which
+the differential had to work around by going through the re-exported `get_ref()` and the
+allocator. Worth knowing before writing a driver against any unit that inherits privately.
+
+### `ArrayIntNull` was an encoding, not infrastructure — the rule paid off twice
+
+Eight methods with no out-of-line definition, which is the shape that nearly caused
+`array_blob` to be parked. Reading the bodies first showed one-to-three-liners over an
+index-plus-one offset and a sentinel in element 0. The hard part —
+`avoid_null_collision` — is out-of-line and is bound, and all seventeen
+`ArrayIntNull::find_first<Cond>` instantiations are defined in `librealm.a` and bound
+rather than reimplemented.
+
+### The finding: the null sentinel can come from a stack address
+
+```cpp
+int_fast64_t ArrayIntNull::choose_random_null(int64_t incoming) const
+{
+    // We just need any number -- it could have been `rand()`, but
+    // random numbers are hard, and we don't want to risk locking mutices
+    // or saving state. The top of the stack should be "random enough".
+    int64_t candidate = reinterpret_cast<int64_t>(&candidate);
+    ...
+}
+```
+
+Reached from `avoid_null_collision` only when `m_width == 64` **and** the incoming value
+equals the current sentinel. Below 64 bits the scheme is deterministic — the sentinel is
+the width's upper bound.
+
+At width 64 it is **not deterministic**: the seed is a stack address, so it varies with
+ASLR between processes. A `.realm` containing a 64-bit nullable integer column that ever
+hits a sentinel collision therefore has a byte in it that differs run to run.
+
+That is a statement about **upstream**, not about this port — and it is exactly the class
+of thing `make determinism-check` exists to catch. It does not fire today because no
+trace stores a nullable 64-bit integer or a Timestamp. If the trace schema is ever
+extended to cover them, expect determinism-check to fail **on the oracle**, and expect
+that to be correct rather than a harness bug. Recorded now so that is diagnosed in
+minutes rather than days.
+
+### An honest coverage gap
+
+Three negative controls, two of which bite:
+
+| control | result |
+|---|---|
+| drop `ArrayIntNull`'s index+1 offset in `get` | exit 1 — caught |
+| `GreaterEqual` tie-break uses `>` instead of `>=` on nanoseconds | exit 1 — caught |
+| **skip `avoid_null_collision` before storing** | **exit 0 — NOT caught** |
+
+The third is a real gap, and unlike `array_blob`'s uncaught control it is not proof of
+unreachability. Skipping the call only diverges when a stored value collides with the
+current sentinel, and the driver cannot force that: below width 64 the sentinel is the
+width's upper bound, which the driver does not compute, and at width 64 it is the stack
+address above. It is also not printed — `ArrayTimestamp::get` returns user-visible values
+and the sentinel lives in element 0 of `m_seconds`' backing array, which no public
+accessor reaches.
+
+So the null-collision path is **ported but unverified**, and saying so is better than
+leaving a control in that passes for the wrong reason. Closing it needs either the
+sentinel made observable (a driver that reads `m_seconds`' node directly through the
+allocator) or a value chosen to collide at a known width. Recorded as the next thing to
+do for this unit rather than done, because it is a differential improvement rather than
+a porting question.
+
+### Process note against myself
+
+The scoping entry for this unit said "the next iteration lands it or parks it; a second
+measuring pass is the failure mode". The next iteration then spent most of itself
+measuring — vptr offsets, `ArrayIntNull` bindability, the export list — before writing a
+line. It did land, so the commitment held in outcome, but the failure mode it named
+happened anyway and was only noticed partway through. For a unit this size the measuring
+is not avoidable; what is avoidable is calling the previous iteration "measured" when it
+had not yet enumerated the symbols it would need.
