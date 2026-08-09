@@ -9,7 +9,7 @@ sent the loop at dead or ungradeable code seven times in one session.
 
 | column | meaning |
 |---|---|
-| `depth` | longest chain of `#include`s within `upstream/src/realm/`. 0 = pulls in nothing else from realm |
+| `depth` | longest chain of `#include`s within `upstream/src/realm/`, over the DAG of strongly-connected components. 0 = pulls in nothing else from realm |
 | `inbound` | how many other units depend on this one. High inbound at low depth unblocks the most |
 | `lines` | size of the `.cpp`. A tiebreak, nothing more |
 | `linked` | realm-owned symbols the unit defines that survive into `build/oracle/trace_runner` |
@@ -21,6 +21,13 @@ A *partial* count is not reassurance either — check whether the linked subset 
 the functions the unit is named for (`util/demangle` linked 5 of 6 and the missing one
 was its entire payload).
 
+**`depth` cannot rank the core.** 51 of 103 units form a single
+strongly-connected component — `alloc`, `array`, `table`, `group` and `db` all
+mutually `#include` each other — so they share one depth and depth says nothing about
+their relative order. Among those, `inbound` and the screen in
+`.claude/rules/unit-screening.md` are the only ranking signals; a low depth here means
+"outside the core cycle", not "early in a chain".
+
 Not computed here: whether any **trace** reaches the unit. That needs an lldb
 breakpoint sweep per unit per trace — minutes each, so it cannot run over 100 units
 in a generator. Measure it by hand for the head of the queue and prefer a traced unit
@@ -31,68 +38,68 @@ Do not hand-edit this file — regenerate it. Record progress in JOURNAL.md.
 
 | # | unit | depth | inbound | lines | linked | status |
 |---|---|---|---|---|---|---|
-| 1 | `upstream/src/realm/unicode.cpp` | 1 | 5 | 339 | 9 | pending |
-| 2 | `upstream/src/realm/impl/transact_log.cpp` | 1 | 2 | 64 | 5 | pending |
-| 3 | `upstream/src/realm/exceptions.cpp` | 2 | 11 | 180 | 128 | pending |
-| 4 | `upstream/src/realm/array_fixed_bytes.cpp` | 2 | 8 | 220 | 90 | pending |
-| 5 | `upstream/src/realm/util/terminate.cpp` | 2 | 5 | 157 | 2 | pending |
-| 6 | `upstream/src/realm/decimal128.cpp` | 2 | 4 | 1848 | 48 | pending |
-| 7 | `upstream/src/realm/util/timestamp_formatter.cpp` | 2 | 1 | 61 | 4 | pending |
-| 8 | `upstream/src/realm/global_key.cpp` | 2 | 1 | 176 | 6 | pending |
-| 9 | `upstream/src/realm/util/thread.cpp` | 3 | 9 | 318 | 22 | pending |
-| 10 | `upstream/src/realm/array_decimal128.cpp` | 3 | 6 | 324 | 19 | pending |
-| 11 | `upstream/src/realm/bplustree.cpp` | 3 | 4 | 843 | 73 | pending |
-| 12 | `upstream/src/realm/util/fifo_helper.cpp` | 3 | 1 | 105 | 7 | pending |
-| 13 | `upstream/src/realm/tokenizer.cpp` | 3 | 1 | 306 | 12 | pending |
-| 14 | `upstream/src/realm/util/uri.cpp` | 3 | 0 | 270 | 6 | pending |
-| 15 | `upstream/src/realm/util/bson/bson.cpp` | 3 | 0 | 812 | 1 | pending |
-| 16 | `upstream/src/realm/array_binary.cpp` | 4 | 9 | 227 | 42 | pending |
-| 17 | `upstream/src/realm/util/encrypted_file_mapping.cpp` | 5 | 4 | 1076 | 52 | pending |
-| 18 | `upstream/src/realm/array_string_short.cpp` | 5 | 2 | 327 | 15 | pending |
-| 19 | `upstream/src/realm/util/file_mapper.cpp` | 6 | 5 | 263 | 15 | pending |
-| 20 | `upstream/src/realm/util/file.cpp` | 7 | 9 | 1983 | 89 | pending |
-| 21 | `upstream/src/realm/util/logger.cpp` | 8 | 3 | 206 | 46 | pending |
-| 22 | `upstream/src/realm/util/load_file.cpp` | 8 | 0 | 22 | 4 | pending |
-| 23 | `upstream/src/realm/replication.cpp` | 9 | 12 | 474 | 90 | pending |
-| 24 | `upstream/src/realm/util/interprocess_condvar.cpp` | 9 | 1 | 711 | 10 | pending |
-| 25 | `upstream/src/realm/util/timestamp_logger.cpp` | 9 | 0 | 25 | 5 | pending |
-| 26 | `upstream/src/realm/backup_restore.cpp` | 9 | 0 | 210 | 26 | pending |
-| 27 | `upstream/src/realm/db.cpp` | 10 | 5 | 2939 | 144 | pending |
-| 28 | `upstream/src/realm/spec.cpp` | 10 | 3 | 312 | 24 | pending |
-| 29 | `upstream/src/realm/array_string.cpp` | 11 | 10 | 480 | 45 | pending |
-| 30 | `upstream/src/realm/array_mixed.cpp` | 12 | 8 | 573 | 42 | pending |
-| 31 | `upstream/src/realm/set.cpp` | 13 | 12 | 501 | 270 | pending |
-| 32 | `upstream/src/realm/dictionary.cpp` | 14 | 14 | 1249 | 300 | pending |
-| 33 | `upstream/src/realm/array_backlink.cpp` | 15 | 5 | 277 | 41 | pending |
-| 34 | `upstream/src/realm/cluster.cpp` | 16 | 4 | 1559 | 261 | pending |
-| 35 | `upstream/src/realm/array_key.cpp` | 17 | 13 | 104 | 2 | pending |
-| 36 | `upstream/src/realm/sort_descriptor.cpp` | 17 | 1 | 665 | 88 | pending |
-| 37 | `upstream/src/realm/array_integer.cpp` | 18 | 8 | 223 | 52 | pending |
-| 38 | `upstream/src/realm/table_view.cpp` | 18 | 6 | 584 | 93 | pending |
-| 39 | `upstream/src/realm/history.cpp` | 18 | 0 | 279 | 43 | pending |
-| 40 | `upstream/src/realm/array.cpp` | 19 | 14 | 1351 | 203 | pending |
-| 41 | `upstream/src/realm/transaction.cpp` | 19 | 6 | 970 | 291 | pending |
-| 42 | `upstream/src/realm/alloc_slab.cpp` | 20 | 4 | 1638 | 80 | pending |
-| 43 | `upstream/src/realm/alloc.cpp` | 21 | 4 | 153 | 2 | pending |
-| 44 | `upstream/src/realm/group_writer.cpp` | 22 | 3 | 1442 | 65 | pending |
-| 45 | `upstream/src/realm/group.cpp` | 23 | 12 | 1733 | 129 | pending |
-| 46 | `upstream/src/realm/query_expression.cpp` | 24 | 3 | 711 | 591 | pending |
-| 47 | `upstream/src/realm/cluster_tree.cpp` | 24 | 3 | 1412 | 175 | pending |
-| 48 | `upstream/src/realm/util/serializer.cpp` | 25 | 5 | 459 | 24 | pending |
-| 49 | `upstream/src/realm/query_engine.cpp` | 26 | 1 | 968 | 492 | pending |
-| 50 | `upstream/src/realm/query.cpp` | 27 | 2 | 2060 | 1825 | pending |
-| 51 | `upstream/src/realm/table.cpp` | 28 | 15 | 3352 | 770 | pending |
-| 52 | `upstream/src/realm/collection.cpp` | 29 | 4 | 266 | 77 | pending |
-| 53 | `upstream/src/realm/chunked_binary.cpp` | 29 | 0 | 112 | 1 | pending |
-| 54 | `upstream/src/realm/list.cpp` | 30 | 16 | 999 | 1685 | pending |
-| 55 | `upstream/src/realm/index_string.cpp` | 31 | 6 | 2170 | 142 | pending |
-| 56 | `upstream/src/realm/link_translator.cpp` | 31 | 1 | 83 | 280 | pending |
-| 57 | `upstream/src/realm/collection_parent.cpp` | 31 | 1 | 188 | 1105 | pending |
-| 58 | `upstream/src/realm/object_converter.cpp` | 31 | 1 | 825 | 71 | pending |
-| 59 | `upstream/src/realm/impl/copy_replication.cpp` | 31 | 0 | 283 | 138 | pending |
-| 60 | `upstream/src/realm/to_json.cpp` | 31 | 0 | 515 | 91 | pending |
+| 1 | `upstream/src/realm/exceptions.cpp` | 2 | 11 | 180 | 128 | pending |
+| 2 | `upstream/src/realm/util/thread.cpp` | 2 | 9 | 318 | 22 | pending |
+| 3 | `upstream/src/realm/util/terminate.cpp` | 2 | 5 | 157 | 2 | pending |
+| 4 | `upstream/src/realm/decimal128.cpp` | 2 | 4 | 1848 | 48 | pending |
+| 5 | `upstream/src/realm/util/timestamp_formatter.cpp` | 2 | 1 | 61 | 4 | pending |
+| 6 | `upstream/src/realm/util/fifo_helper.cpp` | 3 | 1 | 105 | 7 | pending |
+| 7 | `upstream/src/realm/tokenizer.cpp` | 3 | 1 | 306 | 12 | pending |
+| 8 | `upstream/src/realm/util/uri.cpp` | 3 | 0 | 270 | 6 | pending |
+| 9 | `upstream/src/realm/util/bson/bson.cpp` | 3 | 0 | 812 | 1 | pending |
+| 10 | `upstream/src/realm/util/file.cpp` | 4 | 9 | 1983 | 89 | pending |
+| 11 | `upstream/src/realm/util/file_mapper.cpp` | 4 | 5 | 263 | 15 | pending |
+| 12 | `upstream/src/realm/util/encrypted_file_mapping.cpp` | 4 | 4 | 1076 | 52 | pending |
+| 13 | `upstream/src/realm/util/logger.cpp` | 5 | 3 | 206 | 46 | pending |
+| 14 | `upstream/src/realm/util/load_file.cpp` | 5 | 0 | 22 | 4 | pending |
+| 15 | `upstream/src/realm/util/interprocess_condvar.cpp` | 6 | 1 | 711 | 10 | pending |
+| 16 | `upstream/src/realm/util/timestamp_logger.cpp` | 6 | 0 | 25 | 5 | pending |
+| 17 | `upstream/src/realm/backup_restore.cpp` | 6 | 0 | 210 | 26 | pending |
+| 18 | `upstream/src/realm/list.cpp` | 7 | 16 | 999 | 1685 | pending |
+| 19 | `upstream/src/realm/table.cpp` | 7 | 15 | 3352 | 770 | pending |
+| 20 | `upstream/src/realm/mixed.cpp` | 7 | 14 | 891 | 28 | pending |
+| 21 | `upstream/src/realm/dictionary.cpp` | 7 | 14 | 1249 | 300 | pending |
+| 22 | `upstream/src/realm/array.cpp` | 7 | 14 | 1351 | 203 | pending |
+| 23 | `upstream/src/realm/array_key.cpp` | 7 | 13 | 104 | 2 | pending |
+| 24 | `upstream/src/realm/replication.cpp` | 7 | 12 | 474 | 90 | pending |
+| 25 | `upstream/src/realm/set.cpp` | 7 | 12 | 501 | 270 | pending |
+| 26 | `upstream/src/realm/group.cpp` | 7 | 12 | 1733 | 129 | pending |
+| 27 | `upstream/src/realm/array_string.cpp` | 7 | 10 | 480 | 45 | pending |
+| 28 | `upstream/src/realm/obj.cpp` | 7 | 10 | 2506 | 566 | pending |
+| 29 | `upstream/src/realm/array_binary.cpp` | 7 | 9 | 227 | 42 | pending |
+| 30 | `upstream/src/realm/array_fixed_bytes.cpp` | 7 | 8 | 220 | 90 | pending |
+| 31 | `upstream/src/realm/array_integer.cpp` | 7 | 8 | 223 | 52 | pending |
+| 32 | `upstream/src/realm/array_mixed.cpp` | 7 | 8 | 573 | 42 | pending |
+| 33 | `upstream/src/realm/array_decimal128.cpp` | 7 | 6 | 324 | 19 | pending |
+| 34 | `upstream/src/realm/table_view.cpp` | 7 | 6 | 584 | 93 | pending |
+| 35 | `upstream/src/realm/transaction.cpp` | 7 | 6 | 970 | 291 | pending |
+| 36 | `upstream/src/realm/index_string.cpp` | 7 | 6 | 2170 | 142 | pending |
+| 37 | `upstream/src/realm/array_backlink.cpp` | 7 | 5 | 277 | 41 | pending |
+| 38 | `upstream/src/realm/util/serializer.cpp` | 7 | 5 | 459 | 24 | pending |
+| 39 | `upstream/src/realm/db.cpp` | 7 | 5 | 2939 | 144 | pending |
+| 40 | `upstream/src/realm/alloc.cpp` | 7 | 4 | 153 | 2 | pending |
+| 41 | `upstream/src/realm/collection.cpp` | 7 | 4 | 266 | 77 | pending |
+| 42 | `upstream/src/realm/geospatial.cpp` | 7 | 4 | 560 | 59 | pending |
+| 43 | `upstream/src/realm/bplustree.cpp` | 7 | 4 | 843 | 73 | pending |
+| 44 | `upstream/src/realm/cluster.cpp` | 7 | 4 | 1559 | 261 | pending |
+| 45 | `upstream/src/realm/alloc_slab.cpp` | 7 | 4 | 1638 | 80 | pending |
+| 46 | `upstream/src/realm/node.cpp` | 7 | 3 | 170 | 12 | pending |
+| 47 | `upstream/src/realm/spec.cpp` | 7 | 3 | 312 | 24 | pending |
+| 48 | `upstream/src/realm/query_expression.cpp` | 7 | 3 | 711 | 591 | pending |
+| 49 | `upstream/src/realm/cluster_tree.cpp` | 7 | 3 | 1412 | 175 | pending |
+| 50 | `upstream/src/realm/group_writer.cpp` | 7 | 3 | 1442 | 65 | pending |
+| 51 | `upstream/src/realm/impl/transact_log.cpp` | 7 | 2 | 64 | 5 | pending |
+| 52 | `upstream/src/realm/array_string_short.cpp` | 7 | 2 | 327 | 15 | pending |
+| 53 | `upstream/src/realm/query.cpp` | 7 | 2 | 2060 | 1825 | pending |
+| 54 | `upstream/src/realm/link_translator.cpp` | 7 | 1 | 83 | 280 | pending |
+| 55 | `upstream/src/realm/global_key.cpp` | 7 | 1 | 176 | 6 | pending |
+| 56 | `upstream/src/realm/collection_parent.cpp` | 7 | 1 | 188 | 1105 | pending |
+| 57 | `upstream/src/realm/sort_descriptor.cpp` | 7 | 1 | 665 | 88 | pending |
+| 58 | `upstream/src/realm/object_converter.cpp` | 7 | 1 | 825 | 71 | pending |
+| 59 | `upstream/src/realm/query_engine.cpp` | 7 | 1 | 968 | 492 | pending |
+| 60 | `upstream/src/realm/history.cpp` | 8 | 0 | 279 | 43 | pending |
 
-Depth-0 (shim-free) units: **14** of 103. Pending: **65**. Unreachable (`linked` = 0): **12**.
+Depth-0 (shim-free) units: **14** of 103. Pending: **64**. Unreachable (`linked` = 0): **12**.
 
 If the depth-0 number is small, the port will be shim-heavy from the start and the
 boundary count in `make shim-report` will rise before it falls. That is expected;

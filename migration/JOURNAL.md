@@ -3924,3 +3924,81 @@ acting on the count.
 About 2.5 hours, roughly half of it on the exhaustive driver and the `case_map`
 capacity question — of which the capacity half was, in the end, answered by deleting the
 work rather than finishing it.
+
+---
+
+## Tooling — `migration/gen_queue.py`'s `depth` column was noise — 2026-08-09
+
+Not a unit. Found while screening the next candidate: the queue's top 50 rows had
+reshuffled after porting `unicode.cpp`, and `array_integer` had moved from depth 18 to
+depth 1. Porting one unit cannot do that, so the column was measured instead of trusted.
+
+**Four consecutive runs of the generator over an unchanged tree:**
+
+| run | `array_integer` depth |
+|---|---|
+| 0 | 1 |
+| 1 | 30 |
+| 2 | 34 |
+| 3 | 24 |
+
+and with `PYTHONHASHSEED` pinned to 1/2/3: 30, 27, 14. So the primary sort key of the
+file that decides what to port next was **per-process random**.
+
+### Cause
+
+Two things that are each harmless alone:
+
+```python
+def depth(k, seen):
+    if k in memo: return memo[k]
+    if k in seen or k not in units: return 0
+    d = 1 + max(depth(x, seen | {k}) for x in units[k]["deps"] if x in units)
+    memo[k] = d
+```
+
+`deps` is a **`set`**, so iteration order varies per process with string hash
+randomisation. And realm's include graph has **cycles**, so `seen` is load-bearing — it
+is what cuts them. Memoising a value computed under one `seen` set reuses it for paths
+where a different edge would have been cut. Whichever unit the walk reached first
+determined the cached depth for its whole cycle, and everything after read the stale
+value.
+
+### Fix
+
+"Longest chain" is undefined on a cycle, so the fix is to make the question well-formed
+rather than to cut better: **condense strongly-connected components (Tarjan, iterative)
+and take the longest path over the resulting DAG.** Every unit in a cycle gets the same
+depth. Deterministic by construction — no memo across paths, every `deps` iteration
+sorted. Verified: byte-identical `queue.md` across four hash seeds.
+
+### The finding that outlives the bug
+
+**51 of 103 units are one strongly-connected component.** `alloc`, `alloc_slab`, `array`,
+`array_backlink`, `table`, `group`, `db` and 44 others all mutually include each other.
+
+The depth histogram is now `{0:14, 1:12, 2:5, 3:7, 4:3, 5:3, 6:3, 7:51, 8:4, 9:1}` — that
+spike at 7 is the core, and max depth fell from ~31 to 9.
+
+This changes what the queue can do. "Leaves-first by dependency depth" is a meaningful
+instruction for the 52 units outside the cycle and **meaningless for the 51 inside it**;
+they have no include-order relationship to each other at all. Among those, `inbound` and
+the screen in `unit-screening.md` are the only ranking signals, and the eventual port of
+the core will have to cut that cycle somewhere the include graph does not suggest. The
+generated `queue.md` now says so in its header rather than leaving depth 7 to look like a
+chain position.
+
+### What this invalidates
+
+Any "ported out of strict queue order" note in this journal written before today compares
+against an ordering that would not reproduce. The unit *choices* were made on the screen
+in `unit-screening.md` — reachability, vtables, exceptions — not on the depth number, so
+no port was actually misdirected by this. But the ordering rationale in those notes is
+retrospective narration, not a record of what the file said at the time.
+
+The wider lesson matches the one `unit-screening.md` keeps relearning in a different
+register: **a number that has never been checked for reproducibility is not a
+measurement.** The `linked` column was measured into existence precisely because `depth`
+and `lines` did not predict anything — and `depth` turned out not to be predicting
+anything partly because it was random. Two reflections argued about how to weight it.
+Neither ran it twice.

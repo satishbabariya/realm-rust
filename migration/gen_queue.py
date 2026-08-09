@@ -133,6 +133,111 @@ def blocked_matches(key: str, blocked_stems: set[str]) -> bool:
     return key.replace("/", "-") in {s.replace("/", "-") for s in blocked_stems}
 
 
+def assign_depths(units: dict[str, dict]) -> None:
+    """Set units[k]["depth"] = longest include chain within upstream/src/realm/.
+
+    Rewritten 2026-08-09 (the third time this file's depth column has been wrong, and the
+    first time it was *measured* wrong rather than argued wrong).
+
+    The previous implementation memoised a depth that had been computed under a specific
+    `seen` set:
+
+        def depth(k, seen):
+            if k in memo: return memo[k]
+            if k in seen or k not in units: return 0
+            d = 1 + max(depth(x, seen | {k}) for x in deps)
+            memo[k] = d
+
+    Realm's include graph has cycles, so `seen` is load-bearing: it is what cuts the
+    cycle. Caching the result globally reuses a value that is only valid for the path it
+    was reached by. Combined with `deps` being a `set` — whose iteration order varies per
+    process with PYTHONHASHSEED — the whole column was nondeterministic. Four consecutive
+    runs over an unchanged tree gave `array_integer` depths of 1, 30, 34 and 24, and the
+    queue's top 50 rows reshuffled by ~55 lines each time.
+
+    That is worse than a wrong number: the queue's stated purpose is to rank by what the
+    gate can judge, and the primary sort key was noise. Any "ported out of queue order"
+    note in JOURNAL.md written before this date compares against an ordering that would
+    not reproduce.
+
+    "Longest chain" is undefined on a cycle, so the fix is to make the question
+    well-formed rather than to pick a better cut: condense strongly-connected components
+    (Tarjan) and take the longest path over the resulting DAG. Every unit in a cycle gets
+    the same depth, which is the honest answer — mutually-including headers have no
+    ordering between them. Depth 0 still means "pulls in nothing else from realm", and
+    that is now a property of the graph rather than of the walk order.
+
+    Deterministic by construction: no memo across paths, and every iteration over `deps`
+    is sorted.
+    """
+    keys = sorted(units)
+    adj = {k: sorted(d for d in units[k]["deps"] if d in units) for k in keys}
+
+    # --- Tarjan SCC, iterative: realm's include graph is deep enough to blow the
+    # recursion limit, and a RecursionError here would look like a missing unit.
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    on_stack: set[str] = set()
+    stack: list[str] = []
+    comp_of: dict[str, int] = {}
+    comps: list[list[str]] = []
+    counter = 0
+
+    for root in keys:
+        if root in index:
+            continue
+        work = [(root, 0)]
+        while work:
+            v, pi = work[-1]
+            if pi == 0:
+                index[v] = low[v] = counter
+                counter += 1
+                stack.append(v)
+                on_stack.add(v)
+            if pi < len(adj[v]):
+                work[-1] = (v, pi + 1)
+                w = adj[v][pi]
+                if w not in index:
+                    work.append((w, 0))
+                elif w in on_stack:
+                    low[v] = min(low[v], index[w])
+            else:
+                if low[v] == index[v]:
+                    comp: list[str] = []
+                    while True:
+                        w = stack.pop()
+                        on_stack.discard(w)
+                        comp_of[w] = len(comps)
+                        comp.append(w)
+                        if w == v:
+                            break
+                    comps.append(comp)
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[v])
+
+    # --- longest path over the condensation. Tarjan emits components in reverse
+    # topological order, so a single forward pass suffices: every successor component
+    # has a lower index and is already final.
+    comp_depth = [0] * len(comps)
+    for ci, comp in enumerate(comps):
+        best = -1
+        for v in comp:
+            for w in adj[v]:
+                cj = comp_of[w]
+                if cj != ci:
+                    best = max(best, comp_depth[cj])
+        # A cycle costs one level for the whole group, not one per member.
+        comp_depth[ci] = best + 1
+
+    for k in keys:
+        units[k]["depth"] = comp_depth[comp_of[k]]
+        # How many units share this depth *because they mutually include each other*.
+        # 1 means the depth is a real ordering statement about this unit; >1 means the
+        # unit sits in a cycle and depth cannot rank it against its cycle-mates.
+        units[k]["scc_size"] = len(comps[comp_of[k]])
+
+
 def main() -> int:
     if not SRC.is_dir():
         print("upstream/src/realm not found — run: git submodule update --init --recursive",
@@ -161,19 +266,7 @@ def main() -> int:
             "deps": deps,
         }
 
-    memo: dict[str, int] = {}
-
-    def depth(k: str, seen: frozenset[str]) -> int:
-        if k in memo:
-            return memo[k]
-        if k in seen or k not in units:
-            return 0
-        d = 1 + max((depth(x, seen | {k}) for x in units[k]["deps"] if x in units), default=-1)
-        memo[k] = d
-        return d
-
-    for k in units:
-        units[k]["depth"] = depth(k, frozenset())
+    assign_depths(units)
 
     inbound = {k: 0 for k in units}
     for k, u in units.items():
@@ -220,6 +313,8 @@ def main() -> int:
     def cell(v) -> str:
         return "?" if v is None else str(v)
 
+    big_scc = max(u["scc_size"] for u in units.values())
+
     out = [
         "# Port queue",
         "",
@@ -233,7 +328,8 @@ def main() -> int:
         "",
         "| column | meaning |",
         "|---|---|",
-        "| `depth` | longest chain of `#include`s within `upstream/src/realm/`. 0 = pulls in nothing else from realm |",
+        "| `depth` | longest chain of `#include`s within `upstream/src/realm/`, over the DAG of "
+        "strongly-connected components. 0 = pulls in nothing else from realm |",
         "| `inbound` | how many other units depend on this one. High inbound at low depth unblocks the most |",
         "| `lines` | size of the `.cpp`. A tiebreak, nothing more |",
         "| `linked` | realm-owned symbols the unit defines that survive into `build/oracle/trace_runner` |",
@@ -244,6 +340,13 @@ def main() -> int:
         "A *partial* count is not reassurance either — check whether the linked subset contains",
         "the functions the unit is named for (`util/demangle` linked 5 of 6 and the missing one",
         "was its entire payload).",
+        "",
+        f"**`depth` cannot rank the core.** {big_scc} of {len(units)} units form a single",
+        "strongly-connected component — `alloc`, `array`, `table`, `group` and `db` all",
+        "mutually `#include` each other — so they share one depth and depth says nothing about",
+        "their relative order. Among those, `inbound` and the screen in",
+        "`.claude/rules/unit-screening.md` are the only ranking signals; a low depth here means",
+        "\"outside the core cycle\", not \"early in a chain\".",
         "",
         "Not computed here: whether any **trace** reaches the unit. That needs an lldb",
         "breakpoint sweep per unit per trace — minutes each, so it cannot run over 100 units",
