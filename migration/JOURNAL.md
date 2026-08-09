@@ -3569,3 +3569,55 @@ capacity and `status` refcount lessons, applied before rather than after being c
   negative delta. Order matters and is mirrored.
 - `Array::adjust` is kept as a `set`/`get` loop rather than "optimised" as its own FIXME
   suggests: each `set` can widen the array, and widening is what the file records.
+
+---
+
+## 2026-08-09 — `array_blobs_big.cpp` parked on one function out of eight
+
+19/19 linked, **traced** (10 hits on `add`), no sole-definer vtable, no throws, no VTT,
+and the simplest layout of the three blob units — `sizeof = 112`, an `Array` plus a
+single `bool m_nullable` at 108, in the base's tail padding. Seven of its eight
+functions need only machinery this crate already has.
+
+Parked on the eighth. Details in `migration/blocked/array_blobs_big.md`.
+
+### The first park where all-or-nothing is what stops it
+
+`find_all` calls `result.add(...)` on an `IntegerColumn&`, i.e. `BPlusTree<int64_t>`,
+whose `add` is inline and expands to
+`bptree_insert(ndx, FunctionRef<size_t(BPlusTreeNode*, size_t)>)`.
+
+Half of that is reachable, which is what made it worth measuring rather than assuming:
+
+| piece | status |
+|---|---|
+| `BPlusTreeBase::bptree_insert(size_t, FunctionRef<…>)` | **bindable**, 1 definition |
+| `util::FunctionRef` | **constructible** — `{void*, callback}`, concrete and passed *by value*, not a template parameter |
+| the callback body — the leaf insert | **not reachable**: no out-of-line `add`/`insert` for `BPlusTree<int64_t>` anywhere, only its constructor and destructors |
+
+So Rust could construct the `FunctionRef` and make the call, and would then have to
+supply the leaf insertion itself — `BPlusTree<int64_t>` widening and node splitting,
+inside a blob unit. That is shared infrastructure improvised in one place.
+
+**This is a genuinely different case from `column_binary`**, which was parked for what
+reads like the same reason. There the callable went to a C++ *function template*, which
+Rust cannot instantiate or call at all. Here the interface is type-erased and callable;
+what is missing is the body. Closer to portable, same verdict — and worth distinguishing
+in `unit-screening.md`, because "a callable crosses the boundary" covers both and only
+one of them is hopeless.
+
+Seven of eight is not a partial landing: the hybrid excludes C++ by link order, so
+defining seven symbols leaves the eighth undefined, `librealm.a` supplies the C++ object
+to resolve it, and the other seven become duplicate symbols.
+
+### What this costs
+
+`array_blobs_big` was the last *traced* candidate. Of the five clean units found behind
+the queue wall, three are now resolved — `array_blob` and `array_blobs_small` landed,
+this one parked — and the two remaining (`array_timestamp`, `decimal128`) are both
+**untraced**. So the next unit, whichever it is, cannot be judged by `make verify`
+beyond "nothing else regressed", and its differential carries the whole burden.
+
+That makes the trace-schema extension recorded last iteration more valuable rather than
+less: it is now the difference between the gate judging the next several units and not.
+Still `harness/traces/`, still the human's call, still recorded rather than acted on.
