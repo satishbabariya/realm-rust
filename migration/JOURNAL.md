@@ -2796,3 +2796,57 @@ would not. Take the name from `nm`, never from counting.
 - `strtol(buf, nullptr, 16)` on two characters is mirrored as `hex*16 + hex`, with a
   non-hex byte contributing 0. Reachable only when `is_valid_str` is false, which
   `REALM_ASSERT` would have caught in a debug build and does not here.
+
+---
+
+## 2026-08-09 — `impl/output_stream.cpp` parked; the definer-count rule parks something for the first time
+
+Queue #21, the first unit neither ported nor blocked. ~10 minutes. Details in
+`migration/blocked/impl-output_stream.md`. Loop restarted at 5-minute cadence by the
+human after the `shim-report` stop; the metric issue is unchanged and still theirs.
+
+Parked on step 2 and step 5, both genuine:
+
+- **Step 2, definer count 1.** The unit throws `util::overflow_error`, i.e.
+  `ExceptionWithBacktrace<std::overflow_error>`, and it is the only TU in `librealm.a`
+  instantiating that specialisation. Its vtable/typeinfo/typeinfo-name have **1**
+  definer; `ExceptionWithBacktraceBase`'s have **5**.
+- **Step 5.** Two `throw util::overflow_error("Stream size overflow")`, EH sites owned by
+  `OutputStream::write` and `write_array`. Two of three exports throw and the third is
+  what they call, so there is no throw-free subset.
+
+### The rule discriminating in both directions, within one class family
+
+This is the first park *caused* by reflection #5's definer-count amendment; until now it
+had only released units (`util/time`, `util/demangle`, four of `util/compression`'s
+seven). Here it holds the line — and the interesting part is that both answers occur in
+the same class family in the same object:
+
+| symbol | definers | consequence |
+|---|---|---|
+| `ExceptionWithBacktraceBase` `ZT*` | 5 | coalesced; removing this TU orphans nothing |
+| `ExceptionWithBacktrace<std::overflow_error>` `ZT*` | 1 | sole source; removing this TU deletes the vtable |
+
+Pre-#5 the screen reported "6 `ZT*` defined" for this unit *and* for `util/time`, and
+would have parked both with the same stated reason. Only one of those was right, and the
+distinction is invisible without the definer count. Good evidence the amendment is
+discriminating rather than just more conservative.
+
+### Two things recorded for whenever this unit is unblocked
+
+- `write_array` does `reinterpret_cast<const char*>(&checksum)` and writes 4 bytes of a
+  `uint32_t` straight into the stream — a **little-endian, byte-visible** write, the same
+  `memcpy`-of-an-int pattern documented in `object_id`. Mirror it, do not tidy it.
+- `do_write`/`write_array` call `std::ostream::write` on a member stream, a different
+  iostreams entry point from the `__put_character_sequence` used by `error_codes` and
+  `status`, with no convenient inline-template form to bind to.
+
+Unlike `util/time` and `util/demangle`, this unit's payload is live and its bytes reach
+the file, so it is a worthwhile customer for the two shims — comparable to `table_ref`
+and better than either of those.
+
+### Loop state
+
+One park, following a landed unit. Consecutive parks: 1. Three units remain from the
+group skipped last iteration and still owed park files: `array_with_find` #22,
+`util/resource_limits` #23, `uuid` #24.
