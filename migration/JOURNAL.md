@@ -1566,3 +1566,99 @@ since `Backtrace` produces no `.realm` bytes at all.
    evidence it will keep producing well-diagnosed parks, which is a real but diminishing
    return — the last three parks each cost an iteration and each taught one screening
    lesson, and the lessons are now arriving faster than the units.
+
+---
+
+## 2026-08-09 — Correction: `array_unsigned.cpp` un-parked. Its main blocker was a wrong measurement.
+
+**`migration/blocked/array_unsigned.md` is deleted. The park was wrong.** Its first and
+load-bearing blocker was:
+
+> `Allocator::translate_critical` has no linkable definition. 35 objects in `librealm.a`
+> carry a definition and all 35 are `weak private external` … In the linked oracle it
+> collapses to a **local** symbol … So Rust can bind to the slow path and not the fast
+> one, which is the wrong way round.
+
+The observation was right; the inference was wrong. **A `weak private external` symbol
+inside an archive *is* linkable from an outside object.** Mach-O `N_PEXT` means "external
+during static linking, made local in the output image" — it is in the archive symbol
+table, `ld` resolves references to it, and only then hides it. The lowercase `t` I read in
+`nm build/oracle/trace_runner` is the *result* of that hiding, not evidence that the
+symbol was unavailable.
+
+Tested directly, twice, rather than reasoned about:
+
+```
+# 1. plain: driver.o + librealm.a
+extern "C" char* tc(const void*, void*, size_t)
+    asm("__ZNK5realm9Allocator18translate_criticalEPNS0_14RefTranslationEm");
+-> links, resolves to 0x100284a50
+
+# 2. the hybrid's actual link order: main.o  libshim.a  librealm.a
+-> links, resolves; symbol is `t` (local) in the output, as expected
+```
+
+The second form is the one that matters: a staticlib placed *before* `librealm.a` can
+reference the symbol and have `ld` satisfy it from `librealm.a` afterwards. That is
+exactly how `librealm_core_rs.a` sits on the hybrid link line.
+
+### What this does to the unit
+
+Blocker #1 is gone. `Allocator::translate(ref)` in Rust is now:
+
+```
+ptr = atomic load at m_alloc + 24        (measured offset)
+if ptr != null -> translate_critical(m_alloc, ptr, ref)     (bindable, proven above)
+else           -> do_translate, vtable slot 6               (measured, adj = 0)
+```
+
+No reimplementation of `RefTranslation`, no encryption-conditional layout, no copy of
+`alloc.hpp`'s hot path. What remains is two virtual dispatches at slots measured off the
+compiler, both `adj = 0` — roughly ten lines, not a shim. **The unit is portable.**
+
+That also demotes the "ref-translation shim" I recommended twice as the highest-value
+next work. Most of what I claimed it had to provide, the linker already provides.
+
+### Measurements kept from the deleted park file
+
+- `Allocator`: vptr@0, `m_baseline`@8, `m_debug_watch`@16, `m_ref_translation_ptr`@24,
+  `sizeof = 64`. `is_read_only(ref)` is `ref < m_baseline`, relaxed load.
+- `MemRef` is `{char*, size_t}`, `sizeof = 16`, trivially copyable → `create_node`
+  returns it in `rax:rdx`, no `sret`.
+- Vtable slots, all `adj = 0`: `ArrayParent::get_child_ref` = **2**,
+  `update_child_ref` = 3, `Allocator::do_translate` = **6**, `Allocator::do_alloc` = 3.
+- Measuring technique, since `-fdump-vtable-layouts` emits nothing for a TU that is not
+  the key-function TU: the Itanium ABI encodes a pointer to a *virtual* member function
+  as `{ptrdiff_t ptr, ptrdiff_t adj}` with an **odd** `ptr` equal to
+  `1 + byte offset into the vtable`. `memcpy` the pmf into two `long`s and read the index
+  off it. Works for protected and inherited virtuals via a concrete overrider.
+- A translation unit is **all-or-nothing** under this harness: the hybrid excludes C++ by
+  link order, so defining 9 of 10 symbols leaves the tenth undefined, `ld` pulls the C++
+  object to resolve it, and the other nine become duplicate symbols. This one stands and
+  is unaffected.
+- Two live `REALM_UNREACHABLE()` at `array_unsigned.cpp:120` and `:158` must become
+  `realm::util::terminate("Unreachable code", file, line)`.
+
+### The lesson, which is not the one I have been writing down
+
+Three iterations in a row I wrote a journal entry about `nm` answering a narrower
+question than the one being asked. This is the fourth, and it is a different failure:
+**I read a symbol's attribute in the wrong artifact.** `weak private external` in the
+`.o` and `t` in the linked binary describe the same symbol at two stages of the same
+process; I treated the second as contradicting the first when it is caused by it.
+
+The four `nm` amendments queued for reflection #4 are all "use a different command".
+This one is not — the command was fine. The rule that generalises is cheaper and blunter:
+**when a screening step is about to decide port-or-park, and the step is a claim about
+what the linker will do, link something.** Two three-line test programs settled in five
+minutes what two iterations of `nm` reading got backwards, and one of those iterations
+shipped a wrong park file and a wrong recommendation to the user twice.
+
+`evidence-and-linkage.md` already opens with "Source grep is not the test; the link is."
+That sentence is about reachability. It generalises, and I did not apply it.
+
+### Status
+
+`array_unsigned.cpp` is back in the queue and is the unit for the next iteration. It is
+still the only byte-visible candidate identified so far — the one unit whose bytes
+`make diff-test` can actually judge.
