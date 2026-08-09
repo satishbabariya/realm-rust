@@ -35,7 +35,7 @@ pub mod util;
 /// enforces that, so the two cannot drift.
 #[no_mangle]
 pub extern "C" fn realm_rs_units_ported() -> u32 {
-    3
+    4
 }
 
 #[cfg(test)]

@@ -18,3 +18,4 @@
 util/base64.cpp
 disable_sync_to_disk.cpp
 string_data.cpp
+util/sha_crypto.cpp

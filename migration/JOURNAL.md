@@ -507,3 +507,87 @@ Neither of these was acted on. Both are outside what `/reflect` may change.
    pass. This is a coverage gap in the gate, not a weakening of it — the request is to
    make `diff-test` see *more*, and `index_string.cpp` (#50) should not be attempted
    until a trace builds an index.
+
+---
+
+## 2026-08-09 — `util/sha_crypto.cpp` ported; the depth-0 deadness was not representative
+
+### The assumption that was wrong
+
+Five ticks were spent treating `basic_system_errors.cpp` (#8) as a hard block, on the
+grounds that the next eligible unit needed a `std::error_category` shim. That was true
+and is still true — but it was never a block on *the queue*, only on that unit. I had
+only ever classified the 13 depth-0 units, and generalised from them.
+
+Running the reachability check over all 60 listed units: **48 live, 12 dead.** The
+deadness is concentrated almost entirely in depth 0 (7 of 13 there, 5 of 47 elsewhere),
+because depth-0 leaves are disproportionately sync-only helpers and standalone-tool
+utilities. There was never a shortage of portable work.
+
+Lesson worth keeping: a classification run on the cheapest-to-reach subset is not a
+sample of the population. The `nm` intersection costs about a second per unit; run it
+over the whole queue once rather than over the head of it repeatedly.
+
+### Target selection, and one rejected candidate
+
+`uuid.cpp` looked ideal — 126 lines, depth 1, live, and a strict on-disk byte layout.
+Rejected on reading: its constructor **throws** `InvalidUUIDString`, and `to_string()`
+and `to_base64()` both return `std::string` by value. Throwing a C++ exception from
+Rust needs `__cxa_throw` with a correctly constructed exception object and matching
+RTTI — the same class of ABI work as the `error_category` shim, and not something to
+start mid-tick. Worth recording so the next session does not re-derive it: **check for
+`throw` and for STL-by-value returns before committing to a unit**, not after.
+
+`util/sha_crypto.cpp` was chosen instead: 4/4 symbols live, no exceptions, no STL by
+value, and only `Span` crossing the boundary — a convention `base64` had already pinned
+down.
+
+### Why this port is a wrapper
+
+On Apple the C++ is a thin shim over CommonCrypto. Reimplementing SHA in Rust would be
+a *different* implementation that merely ought to agree; calling the same system
+routines makes the digests identical by construction. The pure-Rust version, if ever
+wanted, can be written later against this unit's differential.
+
+The three non-Apple branches (BCrypt, OpenSSL, bundled SHA-2) are not ported. The
+module carries a `compile_error!` under `cfg(not(target_vendor = "apple"))` so a
+non-Apple hybrid build fails loudly instead of silently linking a stub.
+
+### Format decisions found
+
+- **`CC_LONG` is `uint32_t`, so `CC_SHA1(in, CC_LONG(size), out)` truncates the
+  length.** Verified by compiling against the SDK. An input over 4 GiB is hashed as
+  `size % 2^32` bytes. This is a latent bug in the C++, and it is mirrored exactly —
+  passing the full 64-bit length would compute a *more correct* and therefore
+  incompatible digest.
+- **CommonCrypto algorithm ordinals are not in digest-size order.**
+  `kCCHmacAlgSHA256 = 2`, `kCCHmacAlgSHA224 = 5` — not 4, which is the plausible wrong
+  guess. Taken by compiling against `CommonHMAC.h`, per the standing rule about getting
+  ABI from the build rather than from memory.
+- **Fixed-extent `realm::util::Span<T, N>` stores only a pointer** (`util/span.hpp:262`);
+  the size is a template parameter. Dynamic-extent `Span<T>` stores `{ptr, size}`.
+  Modelling the fixed one as 16 bytes would shift every subsequent argument register.
+  This is the single most likely way to get this unit wrong and it is invisible to the
+  type system on both sides.
+
+### Evidence
+
+`make verify` exit 0 at `rust units ported = 4`. That is the weaker half.
+
+`migration/checks/run_sha_crypto_differential.sh`: **525 probe lines, identical.**
+sha1/sha256 exhaustively over lengths 0..200 — which straddles the 64-byte block
+boundary and the 55/56 padding spill — plus long inputs, all-`0x00`/`0xff` buffers, and
+HMAC over three key patterns at message lengths around the HMAC block boundary.
+
+Note what the differential is really for. Because both sides call CommonCrypto, digest
+agreement is nearly free; the check earns its keep on the Span ABI, the algorithm
+ordinals, and the truncation, each of which fails silently or catastrophically rather
+than subtly.
+
+### For the next unit
+
+- `global_key.cpp` (#35, live 6/15) calls `util::sha1` and its output reaches the file,
+  so it is the natural follow-on and now has one dependency already in Rust.
+- Screen candidates with: live symbols, then `grep -c throw`, then a look for
+  STL-by-value returns. Two of the three units examined this tick failed on the second
+  or third test.
