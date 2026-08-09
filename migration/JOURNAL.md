@@ -1007,3 +1007,65 @@ believed:
 The honest restatement of that measurement: **78 of 97 are behind the vtable shim, and
 the handful that are not still have to be read before they can be called portable.** A
 mechanical screen narrows the field; it does not finish the job.
+
+---
+
+## 2026-08-09 — `array_unsigned.cpp` scoped: portable, and the right next unit. Not started.
+
+Resolves the question left open by the `column_binary` entry. **It is portable**, and it
+is the only remaining candidate that is both portable and byte-visible. Not parked —
+there is no blocker. Not started either, and the reason is stated at the bottom.
+
+### Why it is portable, unlike `column_binary.cpp`
+
+Everything expensive it does is **out-of-line**, so Rust can call it through the mangled
+symbol rather than having to reimplement it:
+
+```
+realm::Node::create_node(size_t, Allocator&, bool, NodeHeader::Type, NodeHeader::WidthType, int)
+realm::Node::do_copy_on_write(size_t)
+realm::Node::alloc(size_t, size_t)
+realm::Allocator::translate_less_critical(Allocator::RefTranslation*, size_t) const
+realm::util::do_encryption_read_barrier(const void*, size_t, EncryptedFileMapping*, bool)
+```
+
+This is the exact opposite of `column_binary.cpp`, whose dependencies were inlined
+templates and therefore unreachable. Same short `nm -u` list, opposite conclusion —
+which is the point of that entry's warning.
+
+What stays in Rust is the **inline header manipulation**: `set_header_size`,
+`set_width_in_header`, `get_header`, and the width arithmetic in `set_width`, `insert`,
+`erase`, `truncate`. That is element-width logic — the thing byte-identity exists to
+catch, and the thing `.claude/rules/format-fidelity.md` is about. It belongs in Rust.
+
+### What the port has to get right
+
+1. **Object layout.** `ArrayUnsigned : public Node`, and `Node` holds `m_data`, `m_ref`,
+   `Allocator& m_alloc` (a *reference* member, so a pointer in the layout), `m_size`,
+   `m_width`, `m_no_relocation`, `m_missing_parent_update`, plus a parent pointer.
+   Determine whether `Node` is polymorphic before anything else: a vptr at offset 0
+   shifts every field, and the whole-population screen's "no vtable" result only means
+   `array_unsigned.cpp` is not the *key-function TU*, not that `Node` lacks a vtable.
+   Get the offsets from the build (`clang -Xclang -fdump-record-layouts`), not from
+   reading the header.
+2. **`m_width >= 8`** is asserted on entry to `insert`, `erase` and `truncate`
+   (lines 170, 217, 240). `ArrayUnsigned` only handles byte-or-wider widths, so the
+   sub-byte packing paths do not apply here — a narrower scope than `Array`.
+3. **`copy_on_write()` before every mutation**, then `alloc(...)`, then `set_header_size`.
+   Order matters: it decides allocation sequence, and allocation order is visible in the
+   file (`erase_churn.trace` exists for this).
+4. **The differential shape** is archive + link order, per
+   `.claude/rules/evidence-and-linkage.md` — the undefined set reaches `Node`,
+   `Allocator` and `terminate`, so single-object linking will not work.
+
+### Why it is not started
+
+This is a format-critical port whose failure mode is a wrong element width — the one
+class of bug this entire harness exists to detect — and it is the first unit where
+`make diff-test` would actually exercise the result rather than merely confirm nothing
+broke. Beginning it with too little room to finish, verify against the traces and write
+the differential would risk leaving a half-ported mutation path in the tree, which is
+worse than not starting.
+
+The analysis above is the expensive part and it is now done. A session starting fresh
+can go straight to the record layout dump.
