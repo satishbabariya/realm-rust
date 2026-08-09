@@ -896,3 +896,63 @@ count will keep rising for reasons that have nothing to do with spreading. I hav
 touched the Makefile; the metric is part of how this project defines its health and
 changing it is not this skill's call. The decomposition above is offered as the way to
 read it instead, and the entry below records the suggestion properly.
+
+---
+
+## 2026-08-09 — the shim is not a side quest; it gates 80% of the remaining port
+
+No unit ported this iteration. What came out instead is a measurement that should drive
+the next planning decision, and it is worth more than another small unit would have been.
+
+The screen from `.claude/rules/unit-screening.md` was run mechanically over **every
+compiled, unported translation unit** — all 97, not just the 60 the queue lists:
+
+| category | count |
+|---|---|
+| dead (no symbol reaches the linked binary) | 13 |
+| **owns a vtable / RTTI** (`nm` shows `_ZTV`/`_ZTI`/`_ZTS`) | **78** |
+| returns `std::string`/`std::vector` by value, or uses iostreams | 3 |
+| clean by every screen step | **3** |
+
+Three. `column_binary.cpp` (46 lines, one live function), `array_key.cpp` (104 lines,
+two `verify()` instantiations that are near-empty in release), and
+`array_unsigned.cpp` (271 lines).
+
+### What this changes
+
+The vtable/RTTI shim has been described in three previous entries as gating four units.
+That was true of the *queue head*, and it badly understated the position. It gates
+**78 of 97** remaining units, because realm's array and column hierarchies are
+polymorphic and nearly every `array_*.cpp` and `column_*.cpp` is the key-function TU for
+its class.
+
+The same is true, at smaller scale, of `std::string`-by-value: `object_id.cpp`,
+`unicode.cpp` and `status.cpp` are each otherwise clean and each blocked solely on it.
+`to_string()` produces 24 characters, and libc++'s SSO capacity is 22, so it is a heap
+string — the port needs `operator new` and the long-representation layout, not just the
+short one.
+
+So the remaining work is not "a long tail of units with two awkward ones in it". It is
+two pieces of ABI infrastructure, and then most of the port.
+
+### Recommended order
+
+1. **The vtable/RTTI shim**, proved on `obj_list.cpp` (#15). It is the cheapest member
+   of the group: `__class_type_info` with no base is the simplest RTTI shape, and its
+   destructors are empty, so the vtable layout is the only thing under test. Once it
+   works there, `array_*` opens up.
+2. **`array_unsigned.cpp`** — the highest-value *clean* unit remaining, and the first
+   one whose contents are the thing byte-identity exists to check. `set_width`,
+   `create`, `insert`, `erase`, `truncate` are element-width logic; a wrong width
+   decision there writes a file no other realm binding can read. Every unit ported so
+   far has been byte-invisible or untraced. This one would not be.
+3. `std::string`-by-value, which unblocks `object_id`, `unicode`, `status`, and
+   (with the exception work) `uuid` and `global_key`.
+
+### Method note
+
+Running the screen over all 97 units cost one command and about a minute, and it
+corrected a claim I was about to make — that the clean units were exhausted. They are
+not; there are three. The earlier depth-0 sampling error (see the `sha_crypto` entry)
+was the same mistake: measuring the reachable head of a list and generalising to the
+list. Screen the whole population; it is cheap.
