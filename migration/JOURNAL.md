@@ -4002,3 +4002,97 @@ measurement.** The `linked` column was measured into existence precisely because
 and `lines` did not predict anything — and `depth` turned out not to be predicting
 anything partly because it was random. Two reflections argued about how to weight it.
 Neither ran it twice.
+
+---
+
+## Screening pass: the queue head is exception-gated — 2026-08-09
+
+No unit ported this iteration. Five parked, all measured, and the reason they cluster is
+the finding.
+
+After `unicode.cpp` landed, the next nine candidates were screened before reading any
+source. The result:
+
+| unit | linked | verdict | decided by |
+|---|---|---|---|
+| `exceptions` | **128/128** | park | step 2 — **102 `ZT*`, definer count 1 for all 102** |
+| `util/thread` | 22/22 | park | step 5 — five `realm::`-owned throw sites |
+| `util/terminate` | 2/2 | candidate | clean, but see below |
+| `decimal128` | 48/48 | **candidate — next unit** | clean on every step |
+| `util/timestamp_formatter` | 4/9 | park | step 1 addendum — payload dead |
+| `global_key` | 6/6 | park | step 5 — it **catches** |
+| `tokenizer` | 12/12 | park | steps 2 **and** 5 |
+| `util/fifo_helper` | 7/7 | likely park | all 7 realm-undefined are exception machinery |
+| `util/uri` | 6/35 | likely park | partial linkage + `materialize_message` |
+
+### The structural finding
+
+**`exceptions.cpp` is not blocked on the vtable/RTTI shim — it is the shim.** All 102 of
+its `ZT*` symbols are sole-definer, i.e. it is the key-function TU for realm's entire
+exception hierarchy. It is simultaneously the highest-value pending unit (128/128 linked,
+inbound 11) and the largest RTTI-synthesis job in the tree.
+
+Six units are now parked waiting on exception machinery, and the unit that would supply it
+is itself the hardest one. That is the port's first real inflection point, and it is not a
+decision this loop should make alone. The two options:
+
+1. **Build the exception/RTTI shim.** `__cxa_allocate_exception` + `__cxa_throw` plus
+   emitted `__ZTI*`/`__ZTS*`/`__ZTV*` records with correct `__si_class_type_info` /
+   `__vmi_class_type_info` base edges. Get one base edge wrong and a `catch` clause
+   elsewhere silently stops matching — a behaviour change no `.realm` byte can show, and
+   nothing in the current gate would catch it.
+2. **Declare the exception hierarchy a permanent C++ boundary.** Defensible, because a
+   shim only helps units that *throw*. Units that *catch* stay unportable no matter what:
+   Rust cannot catch a foreign C++ exception and `panic = "abort"` closes the other door.
+
+That second point is the one that makes this a human decision rather than an engineering
+one — it changes what "port realm-core to Rust" means. **Recorded for the human; the loop
+is not deciding it.**
+
+### throw vs catch is the distinction that matters now
+
+Extending step 5's grep from `throw` to `throw|catch|try` has now paid twice, and the two
+halves have *different* prognoses. Worth splitting in the rule:
+
+- **throws only** (`util/thread`, `tokenizer`) — a shim would unblock these.
+- **catches** (`util/backtrace`, `global_key`) — **permanently unportable as whole units**,
+  shim or not.
+
+`global_key` is the sharp case and the one worth remembering: 6/6 linked, **zero** `ZT*`,
+zero `VTT`, byte-visible, and its only realm dependency besides the exception classes is
+`util::sha1`, which is *already ported*. The cleanest screen in the queue. It is parked
+solely because `operator>>` wraps `from_string` in `try`/`catch (const InvalidArgument&)`
+to convert a bad key into a stream failure state. The old `grep -c throw` would have
+cleared it.
+
+### A note on partial linkage, now measured three times
+
+`util/timestamp_formatter` links 4 of 9 — and all four are `MemoryOutputStream` /
+`MemoryOutputStreambuf` destructors, coalesced in from an included header. Not one
+`TimestampFormatter` symbol survives. Same shape as `util/demangle` (5 of 6, payload dead).
+
+Sharper form of the addendum, worth adding to `evidence-and-linkage.md`: **when a unit's
+surviving symbols are all destructors, or all belong to types it merely includes, the unit
+is dead.** Constructors and payload functions carry the signal; destructors of embedded
+types are noise that links regardless.
+
+### Next unit: `decimal128.cpp`
+
+The one clean, high-value candidate. 48/48 linked, **zero** `ZT*`, **zero**
+`throw|catch|try`, zero `VTT`, and exactly **one** realm-undefined symbol
+(`util::Printable::str() const`).
+
+1,848 lines reads as forbidding and is misleading: the unit is a wrapper over the bundled
+Intel BID library (`external/IntelRDFPMathLib20U2/.../bid_functions.h`), so most of that
+is glue over `bid128_*` C functions that Rust can bind directly — 42 non-realm undefined
+symbols, which is what those bindings will be.
+
+It is byte-visible (`Decimal128` is a stored column type) and untraced (the trace schema is
+int/string/double/bool), so it is the `unicode` situation again: the differential is the
+entire evidence, and — being pure arithmetic over a bindable C library — it can be swept
+exhaustively rather than sampled.
+
+`util/terminate` is the other clean unit (2/2 linked, both the real payload) but is worth
+less: it is byte-invisible, its whole observable behaviour is printing and aborting, and it
+needs `Backtrace::capture`/`print`/`~Backtrace` plus `Printable::print_all` imported — four
+`#[link_name]` bindings into a unit that is itself parked as unportable.
