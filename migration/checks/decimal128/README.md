@@ -1,10 +1,13 @@
-# `decimal128.cpp` — in progress
+# `decimal128.cpp` — ported
 
-**Status: the hard half is ported and verified; the unit is not.** The 919-line
-`realm_binary64_to_bid128` is mirrored in Rust and agrees with the C++ over 15.2 million
-comparisons. The ~490 lines of `Decimal128` methods are not written yet, so the TU is still
-C++ in the hybrid and **no gate has been run on this unit**. `make verify` says nothing
-about `decimal128` today.
+**Status: ported.** `make verify` exits 0 at 15 units. Two differentials cover it:
+`run_conv_differential.sh` here for `realm_binary64_to_bid128` (15.2M comparisons), and
+`migration/checks/run_decimal128_differential.sh` for the 47 method symbols (1,470 probe
+lines).
+
+Note what the gate does and does not say. No trace stores a decimal — the trace schema is
+int/string/double/bool — so `make verify` proves the link is intact and that nothing else
+regressed. The differentials are the evidence for the unit itself.
 
 ## Why this unit is shaped the way it is
 
@@ -170,10 +173,47 @@ Over 345,519 doubles: `a <= 0` fast path 15,042; `a <= 48` fast path 4,345; slow
 rest; `e_hi != 39` (the 256×256→512 multiply) 2,405,377 of 2,908,465 on the 3M corpus, with
 `e_hi` spanning 37..42.
 
-## Remaining work
+## Step 2: the methods
 
-1. Port the ~490 lines of `Decimal128` methods over the bound BID functions.
-2. Wire the TU out of the hybrid, `make diff-test`, `make verify`.
+Ported over the bound BID entry points; see `migration/checks/decimal128_differential.cpp`.
+Exclusion is confirmed by fingerprint rather than inference: `decimal128.cpp`'s anonymous-
+namespace tables (`bid_power_five`, `bid_coefflimits_bid128`) are present in the pure-C++
+driver and the oracle binary, and **absent** from the Rust driver and the hybrid. If the
+C++ TU had won the link they would be there.
+
+The methods differential caught a real bug on its first run, on 17 lines whose characters
+were identical and whose `capacity()` was not:
+
+> `to_string()`'s `bid128_to_string` path ends in `return std::string(buffer)` — the
+> `const char*` **constructor**, whose capacity rule is not the append/growth rule. For a
+> 24-character result the constructor gives 31 and growing an empty string by appending
+> gives 47.
+
+Fixed by binding `std::string::basic_string(const char*)` rather than reproducing a second
+capacity rule, per the guidance the `unicode` port established. The measured constructor
+rule is recorded in the source comment and deliberately unused: `n <= 22 -> 22`,
+`n == 23 -> 25`, `n >= 24 -> round_up(n + 1, 8) - 1`. Note this is a *third* libc++
+capacity rule in this repo, distinct from the `resize` rule measured for `unicode` and the
+single fixed length hand-rolled in `object_id`.
+
+### Controls on the methods
+
+Six injected bugs. Four bite: the `to_string` capacity above; `compare()` ordering NaN
+last instead of first; `to_bid32` ignoring the `INEXACT` mask; and the `Bid32` equality
+exponent cutoff `6 -> 5`.
+
+That last one **only bites after the driver was extended.** The original vectors never
+contained two `Bid32` values denoting the same number at exponents differing by exactly
+six, so the cutoff was never exercised and lowering it passed. Pairs that straddle 5, 6 and
+7, plus significands that trip the `9999999` overflow guard mid-loop, were constructed and
+added; the control then bites.
+
+Two do not bite, and both are provably inert rather than uncovered:
+
+| control | why |
+|---|---|
+| `operator==` drops the `null == null` shortcut | `null` is `{0xaa, 0x7c00…}`, which *is* a NaN. `bid128_quiet_equal` returns 0 for it, and the code then falls into the NaN branch, which compares raw words and returns true. The shortcut is redundant with the branch below it |
+| the `int64` constructor uses `wrapping_neg` instead of the C's `val == lowest() ? val : ~val + 1` | `(!x) + 1 == -x` in two's complement for every `x`, `INT64_MIN` included. The C's ternary is a no-op. Mirrored anyway, since that equivalence is the sort of thing that stays true until someone edits it |
 
 Note for step 4: this unit is byte-visible (`Decimal128` is a stored column type) but
 **untraced** — the trace schema is int/string/double/bool, so no trace stores a decimal.

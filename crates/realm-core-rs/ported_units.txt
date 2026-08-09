@@ -29,3 +29,4 @@ array_blob.cpp
 array_blobs_small.cpp
 array_timestamp.cpp
 unicode.cpp
+decimal128.cpp

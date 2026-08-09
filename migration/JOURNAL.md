@@ -4276,3 +4276,106 @@ script now carries a comment saying so.
 
 The ~490 lines of `Decimal128` methods over the already-linkable BID functions, then wire
 the TU out of the hybrid and run the gate.
+
+---
+
+## `upstream/src/realm/decimal128.cpp` — ported — 2026-08-10
+
+`make verify` **exit 0** at **rust units ported = 15**. Two differentials:
+
+- `migration/checks/decimal128/run_conv_differential.sh` — `realm_binary64_to_bid128`,
+  3,045,519 doubles x 5 rounding modes = 15,227,595 comparisons (previous entry)
+- `migration/checks/run_decimal128_differential.sh` — the 47 method symbols, 1,470 probe
+  lines
+
+Byte-visible and **untraced**: `Decimal128` is a stored column type but the trace schema is
+int/string/double/bool, so no trace stores a decimal. `make verify` proves the link is
+intact and that nothing else regressed; the differentials are the evidence for the unit.
+
+### Exclusion confirmed by fingerprint, not inference
+
+`array_timestamp` had to fall back on a symbol-address adjacency check because it has no
+unique file-static. This unit has two: the anonymous-namespace tables `bid_power_five` and
+`bid_coefflimits_bid128`. They are present in the oracle binary and the pure-C++ driver,
+and **absent** from the hybrid and the Rust driver. That is a direct observation that the
+C++ TU lost the link.
+
+### The differential caught a third libc++ capacity rule
+
+On its first run, 17 lines whose *characters were identical* and whose `capacity()` was
+not: C++ 31, Rust 47.
+
+`to_string()`'s `bid128_to_string` path ends in `return std::string(buffer)` — the
+`const char*` **constructor**. Its capacity rule is not the append/growth rule I had used.
+
+This repo has now measured three distinct libc++ string capacity rules, and they disagree:
+
+| path | rule |
+|---|---|
+| `resize` / `append` growth (`unicode`) | `n <= 22 -> 22`, `23..47 -> 47`, `>= 48 -> round_up(n+1,8)-1` |
+| `basic_string(const char*)` ctor (here) | `n <= 22 -> 22`, `n == 23 -> 25`, `>= 24 -> round_up(n+1,8)-1` |
+| the single length `object_id` needed | `n = 24 -> 31` (hand-rolled, consistent with the ctor rule) |
+
+**"The libc++ string capacity rule" is not a thing; there is one per construction path.**
+Fixed by binding `basic_string(const char*)` rather than adding a second formula, which is
+exactly the guidance the `unicode` entry wrote down and the first chance to apply it. The
+measured ctor rule is in the source comment and deliberately unused.
+
+Worth noting the shape of the near-miss: the port was *behaviourally* perfect here. Every
+character of every string matched. Only a field no caller reads was wrong — and it is
+`std::string` internal state that would land in a `.realm` only indirectly, which is
+precisely why `evidence-and-linkage.md` insists the driver print capacity.
+
+### Controls: six injected, four bite
+
+`to_string` capacity; `compare()` ordering NaN last instead of first; `to_bid32` ignoring
+the `INEXACT` mask; and the `Bid32` equality exponent cutoff `6 -> 5`.
+
+**The cutoff control only bites after the driver was extended**, and that is the
+transferable part. The original `Bid32` vectors never contained two values denoting the
+same number at exponents differing by exactly six, so the cutoff was dead and lowering it
+passed. Constructed pairs straddling 5, 6 and 7, plus significands that trip the `9999999`
+overflow guard mid-loop, and the control bites. Same lesson as the `unicode` boundary work:
+**when a control does not bite, first try to build the input that would make it bite.**
+Two of the three non-biters in the conv half turned out to be genuinely inert; this one
+turned out to be a gap, and only construction told them apart.
+
+The two here that do not bite are provably inert:
+
+- **`operator==` dropping the `null == null` shortcut.** `null` is `{0xaa, 0x7c00…}`, which
+  *is* a NaN: `bid128_quiet_equal` returns 0, and the code falls into the NaN branch, which
+  compares raw words and returns true. The shortcut is redundant with the branch below it.
+- **the `int64` constructor using `wrapping_neg`.** The C spells it
+  `val == lowest() ? val : ~val + 1`, and `(!x) + 1 == -x` in two's complement for every
+  `x`, `INT64_MIN` included. Mirrored in the C's shape anyway.
+
+### ABI, measured off the oracle
+
+`Decimal128` is `uint64_t w[2]` — 16 bytes, no vptr, trivially copyable, so INTEGER,INTEGER:
+two registers in and out, never `sret`. `std::optional<Bid32>` (8B) and
+`std::optional<Bid64>` (16B) likewise. Only `to_string` uses `sret`. Confirmed by prologue
+rather than argued:
+
+```
+Decimal128::Decimal128(Bid128, int, bool)
+  14d8: movq %rsi, (%rdi)      ; rsi:rdx = Bid128
+  14db: addl $0x1820, %ecx     ; ecx = exponent   (0x1820 == 6176, the bias)
+  14d4: shlq $0x3f, %r8        ; r8  = sign
+```
+
+`realm::null` is an empty class and still consumes an argument register; declared as a
+dummy `u8` so nothing downstream shifts.
+
+### The manifest probe catches drift, and did
+
+`ported_units.txt` gained a line before `realm_rs_units_ported()` was bumped, and
+`make diff-test` printed `rust units ported = 14` against a 15-line manifest. The unit test
+`probe_matches_the_manifest` is what enforces the two agree — but note that **`make verify`
+does not run `cargo test`**, so the drift was visible only in the harness banner. Anyone
+adding a unit should bump the count in `lib.rs` in the same edit.
+
+### Effort
+
+The unit is 1,848 lines and the methods half took about as long as the 919-line conversion
+half, almost all of it on the ABI and the `std::string` capacity question. Line count
+predicted nothing here, in both directions.

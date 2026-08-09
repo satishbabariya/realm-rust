@@ -23,6 +23,7 @@ pub mod array_blob;
 pub mod array_blobs_small;
 pub mod array_timestamp;
 pub mod array_unsigned;
+pub mod decimal128;
 pub mod disable_sync_to_disk;
 pub mod error_codes;
 mod error_codes_table;
@@ -45,7 +46,7 @@ pub mod util;
 /// enforces that, so the two cannot drift.
 #[no_mangle]
 pub extern "C" fn realm_rs_units_ported() -> u32 {
-    14
+    15
 }
 
 #[cfg(test)]
