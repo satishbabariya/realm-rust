@@ -80,7 +80,7 @@ pub struct Array {
     pub(crate) m_ndx_in_parent: c_uint,        // 48
     m_missing_parent_update: bool,  // 52
     // 53..56 padding
-    vptr_array_parent: *const c_void, // 56
+    pub(crate) vptr_array_parent: *const c_void, // 56
     m_getter: [usize; 2],           // 64  (pointer-to-member)
     m_vtable: *const c_void,        // 80
     m_lbound: i64,                  // 88
