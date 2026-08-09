@@ -2919,3 +2919,70 @@ Two consecutive parks (`impl/output_stream`, this). Stop condition is three.
 `util/resource_limits` #23 (unreachable) and `uuid` #24 (throws) are next and both
 pre-screen as parks — so the third will fire next tick unless the queue is reordered.
 Flagging it now rather than being surprised by it.
+
+---
+
+## 2026-08-09 — `util/resource_limits.cpp` parked. Third consecutive park; loop stopped.
+
+Queue #23. ~5 minutes. Four exported symbols, **zero linked** — category-1 unreachable,
+the simplest park in the queue. No ABI question, no shim, no judgement call, and the
+naive and realm-only filters agree because nothing at all survives.
+
+### The stop condition fired, and this time its stated diagnosis is right
+
+`.claude/loop.md`: *"Three consecutive units end up in `migration/blocked/`. The queue
+order is probably wrong and continuing just fills the directory."*
+
+Three consecutive: `impl/output_stream` #21 (`d75ade3`), `array_with_find` #22
+(`1b97c17`), `util/resource_limits` #23 (this). Recurring job `ef9ea2d1` cancelled.
+
+**Worth contrasting with the `shim-report` stop two windows ago.** That condition fired
+on a metric that counts a successful port's exports as evidence of spreading — the
+condition tripped, the stated diagnosis was false, and the fix was to the metric. This
+one is the opposite: the condition tripped and the stated diagnosis is *exactly right*.
+The queue order is wrong, and I can now say so with numbers rather than an impression.
+
+### Five units of evidence that `gen_queue.py` ranks by the wrong thing
+
+`gen_queue.py` orders by include depth, then by line count. Neither predicts whether a
+unit is portable or whether the gate can see it. Units it placed ahead of clean work:
+
+| # | unit | lines | why it was never portable |
+|---|---|---|---|
+| 14 | `util/compression` | 947 | 7 vtables, real throws, **payload not linked** |
+| 18 | `util/demangle` | 48 | throws; **the one function is not linked** |
+| 19 | `version` | 77 | **0 of 6 realm symbols linked** |
+| 22 | `array_with_find` | 83 | one unit-private vtable |
+| 23 | `util/resource_limits` | 122 | **0 of 4 symbols linked** |
+
+Three of the five are *unreachable or effectively unreachable*, which step 1 detects in
+about a second. They sort ahead of `util/to_string` #27 (7/7 linked, no `ZT*`, no
+throws) and `util/timestamp_formatter` #33 purely on size and depth.
+
+**The queue has no column for the one property that decides everything: does any symbol
+this unit defines survive into `trace_runner`.** That is one `nm` intersection per unit,
+already scripted, and it would have removed three of these five from the queue entirely
+rather than spending an iteration each discovering it.
+
+Concrete proposal, recorded for the human because `migration/queue.md` is generated and
+`gen_queue.py` is theirs to change:
+
+> Add a `linked` column to `gen_queue.py` — the count of realm-owned symbols the unit
+> defines that appear in `build/oracle/trace_runner` — and sort units with `linked == 0`
+> to the bottom or drop them. Then sort the remainder by `inbound`, not by lines.
+
+### Running totals at the stop
+
+10 units ported, 19 parked. `make verify` exit 0 at `rust units ported = 10`, 9
+differentials all passing with negative controls. Of the 19 parks: 9 unreachable or
+dead-payload, 6 vtable/RTTI, 4 exception-shim, with overlap.
+
+**The three shims are now fully characterised**, each with a named best-first customer:
+
+| shim | blocks | best first customer | why that one |
+|---|---|---|---|
+| vtable/RTTI synthesis | 6 units | **`array_with_find` #22** | 4 strong symbols, 3 trivial; 1 unit-private vtable; no throws, no STL by value |
+| exception construction | 4 units | `table_ref` #20 | all symbols linked, live payload, one exception type |
+| exception *catching* | 1 unit | — | `util/backtrace` only; needs real C++ in the hybrid |
+
+Nothing further can land from the front of the queue without one of them.
