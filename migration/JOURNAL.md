@@ -1319,3 +1319,75 @@ four are specific to this unit or this build configuration. The general lesson t
 share — take it off the build, not out of your head — is already the first line of
 `evidence-and-linkage.md`'s last section, and restating it would dilute rather than
 sharpen. The rules files are trusted in proportion to how rarely they churn.
+
+---
+
+## 2026-08-09 — `array_unsigned.cpp` parked. The "portable" verdict was wrong one level down.
+
+Reflection #3 said this unit must be landed or parked this iteration and that a third
+analysis pass was the failure mode. It is **parked**, with a diagnosis, in
+`migration/blocked/array_unsigned.md`. ~40 minutes.
+
+**What changed the verdict.** The scoping entry of 2026-08-09 concluded that "field
+access at fixed offsets is all the ported methods need". That is false.
+`ArrayUnsigned::update_from_parent()` — six lines — expands through inline header code
+into two virtual dispatches (`ArrayParent::get_child_ref`, `Allocator::do_translate`)
+and one inline accessor with **no linkable definition**
+(`Allocator::translate_critical`: 35 copies in `librealm.a`, all `weak private
+external`, all collapsing to a local `t` symbol in the linked binary, while
+`translate_less_critical` — the slow path — is the only one exported as `T`).
+
+Nine of the ten methods need none of that. The tenth needs all of it.
+
+**Why the screen missed it, and the gap in `unit-screening.md` this exposes.** Every
+step of the screen runs `nm` on `array_unsigned.cpp.o`, and inlined code is invisible to
+all of them. The rule already documents this shape for `nm -u` — *"`nm` describes what
+survived to the link, and inlining moves code across that boundary"* — but points it at
+the unit's **callees**. Here the inlining that mattered was in the unit's own
+**inline base-class helpers**: `Node::get_ref_from_parent`, `ArrayUnsigned::init_from_ref`,
+`Allocator::translate`. Proposed as a screening step for reflection #4 rather than
+edited into the rule here: *for a class-shaped unit, expand every inline method it calls
+on its own bases, and check what those bottom out in.* Cost of not having it: two
+iterations that both concluded "portable".
+
+**Measurements taken, now in the park file so the shim work starts from data:**
+
+- `Allocator` record layout — vptr@0, `m_baseline`@8, `m_debug_watch`@16,
+  `m_ref_translation_ptr`@24, `sizeof=64`. `is_read_only(ref)` is `ref < m_baseline`.
+- `realm::MemRef` is `{char*, size_t}`, `sizeof=16`, trivially copyable → `create_node`
+  returns it in `rax:rdx`, no `sret`.
+- Vtable slots: `ArrayParent::get_child_ref` = **2**, `update_child_ref` = 3,
+  `Allocator::do_translate` = **6**, `do_alloc` = 3. All with `adj = 0`.
+
+**How the slots were measured, which is reusable.** `-Xclang -fdump-vtable-layouts`
+emits *nothing* for these classes — neither on `array_unsigned.cpp` nor on a probe TU
+defining a concrete subclass — because a TU only dumps vtables it emits, and this is not
+the key-function TU. The technique that does work: the Itanium ABI encodes a pointer to
+a *virtual* member function as `{ptrdiff_t ptr, ptrdiff_t adj}` with an **odd** `ptr`
+equal to `1 + byte offset into the vtable`. So `memcpy` the pmf into two `long`s and
+read the index off it. Works for protected pure virtuals via a concrete overrider, needs
+no codegen, and cannot disagree with the compiler. Probe kept in the park file's table.
+
+**One general property of the harness, worth stating once.** Because the hybrid excludes
+C++ purely by link order, **a translation unit is all-or-nothing**. Defining 9 of 10
+symbols in Rust leaves the tenth undefined when `librealm.a` is scanned, `ld` pulls the
+C++ object to resolve it, and the other nine become duplicate symbols — a hard link
+failure. "Port the easy methods and leave the hard one" is not available for any unit.
+
+**What this unit is really waiting on.** Not a blocker specific to it: a
+**ref-translation + virtual-dispatch shim** in the crate — `translate()`, `is_read_only()`,
+and a single audited table of vtable slot indices. Every array unit needs all three. The
+whole-population screen (`128101c`) already put 78 of 97 remaining units behind a vtable
+shim; this identifies the ref-translation half of the same boundary and gives it a first
+concrete customer. Reimplementing `translate_critical` inside one array unit would mean
+copying `alloc.hpp`'s hot path — including `RefTranslation`'s
+`REALM_ENABLE_ENCRYPTION`-conditional layout, which is `ON` in this build — into that
+unit, and again into the next one.
+
+**Loop health.** This is a park, so the "three consecutive parks" condition now stands at
+one (the previous park was `column_binary` at `ac79027`, with two non-park iterations
+between). No stop condition fired. But reflection #3's observation stands and this
+iteration is evidence for it: the queue keeps producing units that are individually
+reasonable and collectively blocked on the same missing shim. **The next iteration should
+build the shim, not pick the next unit off the queue** — the queue is ordered by
+dependency depth and size, and neither predicts the thing that is actually gating.
