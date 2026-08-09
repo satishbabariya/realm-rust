@@ -3494,3 +3494,78 @@ wrong risk on exactly the unit where correctness is most checkable. Recorded her
 next iteration starts from the layout rather than re-deriving it, and — per reflection
 #3's rule, invoked against myself as with `array_blob` — the next iteration lands it or
 parks it. A second measuring pass is the failure mode.
+
+---
+
+## 2026-08-09 — `array_blobs_small.cpp` landed; the gate reached it and still missed the bug that matters
+
+`make verify` exits 0 at `rust units ported = 12`.
+`migration/checks/run_array_blobs_small_differential.sh` exits 0 on 169 probe lines with
+three negative controls. Landed in the iteration after it was measured, as committed.
+
+### The gate reaches this unit and is still shallow — measured, not assumed
+
+`ArraySmallBlobs::insert` is hit 46 times and `set` 4 times across the five traces, so
+by the coverage test used until now this unit is "traced" and `make diff-test` judges it.
+Two bugs injected into the landed Rust say otherwise:
+
+| injected bug | `make diff-test` |
+|---|---|
+| zero terminator not counted in the stored size | **FAIL** (1 trace) |
+| later offsets not shifted on a mid-list insert | **PASS** |
+
+The second is the bug this unit exists to avoid, and the traces cannot see it because
+they only ever **append**. With `ndx == size()`, the adjust range `[ndx+1, size())` is
+empty, so skipping it changes nothing. Nothing in the trace schema inserts into the
+middle of a string column, erases from one, or sets an existing element to a different
+length.
+
+**So "traced" is not a property of a unit, it is a property of a unit's *paths*.** The
+coverage table this journal has been keeping — hit counts per exported function — is too
+coarse: `insert` shows 46 hits and its interesting branch has zero. Proposed for
+reflection #6: when a hit count justifies relying on the gate, say *which argument
+values* the traces supply, not just how many times the function ran. For this unit the
+honest statement is "append-only, never mid-list".
+
+That also revises the `array_blob` entry's optimism. It reported a width bug failing 5/5
+traces and called that the strongest gate result yet — true, but `array_blob`'s hot path
+has no argument-shape variation to miss. This unit shows the failure mode that hit counts
+hide.
+
+### The differential covers what the traces cannot
+
+169 lines over mid-list insert at front and middle, `set` growing/shrinking/same-size,
+erase at front/middle/end, nulls in every position, `find_first` for strings and binary
+and nulls and ranges, `create_array` at three seed sizes with null and non-null seeds,
+and the static header-only `get`. Three controls, all caught:
+
+| control | result |
+|---|---|
+| skip shifting later offsets on insert | exit 139 (corrupt offsets read out of bounds) |
+| erase forgets to close the offset gap | exit 134 (abort) |
+| `find_first` drops the `is_string` terminator adjustment | exit 1 (clean diff) |
+
+Two of the three fail by crashing rather than by diverging. That is a weaker signal than
+a diff — it says "wrong" without saying where — but it is a failure, and for corrupted
+offsets a crash is the honest outcome since the data structure is no longer walkable.
+
+### `get_string_legacy` is exported, linked, and untestable here
+
+It is **private**, with no public caller reachable from a driver, so the differential
+cannot drive it. It is a strong exported symbol, so something in a wider build calls it.
+Within this harness it stays unverified and the driver says so in a comment rather than
+carrying a probe that silently tests nothing — the same discipline as the `base64`
+capacity and `status` refcount lessons, applied before rather than after being caught.
+
+### Format decisions
+
+- Offsets are **cumulative end offsets**, so an element's start is its predecessor's end
+  and element 0 starts at 0. Every mutation shifts a suffix of that array.
+- Strings are stored **zero-terminated** even when the caller's `BinaryData` is not, so
+  `stored_size` is `value.size() + 1` and `find_first` matches against `value_size + 1`
+  while comparing only `value_size` bytes. Dropping either half breaks every string
+  lookup; control 3 covers it.
+- `erase` adjusts **after** removing the element, over the shortened array, with a
+  negative delta. Order matters and is mirrored.
+- `Array::adjust` is kept as a `set`/`get` loop rather than "optimised" as its own FIXME
+  suggests: each `set` can widen the array, and widening is what the file records.
