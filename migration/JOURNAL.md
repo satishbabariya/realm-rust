@@ -4187,3 +4187,92 @@ differential and running the gate, did not fit the remaining context at the qual
 needs. A rushed transcription is precisely how a wrong byte in a rare double ships behind a
 green differential, which is the failure this whole harness exists to prevent. The
 scaffolding is committed so the transcription starts from verified inputs.
+
+---
+
+## `decimal128.cpp` — the hard half ported and verified — 2026-08-10
+
+**Still not a ported unit. No gate has been run on it.** The TU is C++ in the hybrid, so
+`make verify` says nothing about `decimal128` today. What is done is the piece that decided
+whether the unit was portable at all.
+
+`realm_binary64_to_bid128` — 919 lines of macro-expanded Intel code — is mirrored in
+`crates/realm-core-rs/src/decimal128/conv.rs` and agrees with the vendored C++ on
+
+```
+3,045,519 doubles x 5 rounding modes = 15,227,595 comparisons, value and flags
+```
+
+`migration/checks/decimal128/run_conv_differential.sh`, ~14 seconds.
+
+### Transcription surface is a thing to manage
+
+The 919 lines are ~700 lines of expanded multiply macros. Those are exact schoolbook
+multiplication with no truncation, so they became four helper functions
+(`mul_64x64_to_128` on `u128`, `mul_64x256_to_320`, `mul_128x256_to_384`,
+`mul_256x256_to_512`) that keep the original carry expressions verbatim — including the
+odd-looking `(out < x1) || (x1 < carry)` shape, which is where a rewrite would go wrong.
+
+This is a reduction in **transcription surface**, not a re-derivation: fewer lines is fewer
+typo sites, and the algorithm is untouched. It is worth distinguishing from the shortcut
+recorded (and rejected) in the previous entry — replacing the whole function with bignum
+arithmetic — which changes what is computed.
+
+### The finding: one rounding mode is not enough
+
+Ten negative controls, seven bite. The one that matters:
+
+> **Dropping the sign term from the round-bound index is invisible at the default rounding
+> mode and diverges on 1,455,362 lines under directed rounding.**
+
+Because rows 0,1 of `bid_roundbound_128` are *identical* to rows 2,3 — at
+round-to-nearest-even the bound does not depend on the sign. Rows 4–7 differ. Tested only
+at the default, this port ships with a branch that looks tested and is not.
+
+`__bid_IDEC_glbround` is a **bindable global**, so sweeping the mode costs one `extern`
+and an env var in both drivers. Generalised: **when a unit reads a global that selects
+behaviour, the differential has to sweep that global.** Coverage of the *inputs* is not
+coverage of the *modes*. Nothing else in this repo has had a mode to sweep yet; the next
+unit that does should look for it deliberately.
+
+### Three controls that cannot bite, each diagnosed rather than waved through
+
+Following the precedent of `array_blob` NC2 (unreachable, evidence recorded) versus
+`array_timestamp` NC3 (real gap, recorded as unverified) — all three here are the first
+kind, and each was measured, not argued:
+
+- **`a <= 48` boundary, `<=` → `<`.** A corpus was *constructed* to hit `cint[0] ==
+  pow5[0]` exactly. Instrumentation confirms 10 hits, and both branches produce identical
+  output there. The construction needed one non-obvious step: `cint` is the **odd part** of
+  the mantissa, so it can equal a small odd coefficient limit when the mantissa is that
+  limit shifted left. A first attempt required the limit itself to lie in `[2^52, 2^53)`
+  and found nothing.
+- **Reciprocal reload guard, `+1` → `+0` / `+2` / `+256`.** The branch runs 2,405,377
+  times, but the guard sits in the lowest word of a 256-bit reciprocal and its contribution
+  falls below the precision kept after the 384-bit multiply and shift. **This is the one
+  constant the differential cannot pin.** Mirrored faithfully anyway.
+- **`e_out` correction `19779` → `19778`.** Self-correcting by design: the source says the
+  provisional exponent is "either e_out or e_out-1 depending on later significand check",
+  and the ×10 step is that check. Perturbing the coarse term (`19728`) bites on 164,918
+  lines and the bias (`6512`) on 44,740, so the estimate is covered — only the fine
+  correction is absorbed.
+
+### Decimal128 has redundant representations, and that is why the fast paths matter
+
+Disabling both exact fast paths changes 18,623 lines while changing no *number*: the same
+value comes back at a different coefficient/exponent pairing. A "harmless" restructuring
+that returned an equal-but-differently-encoded result would be invisible to any test that
+compares decimals and fatal to byte-identity. This is the clearest example so far of why
+this project gates on bytes rather than behaviour.
+
+### Rosetta, again
+
+The Rust driver must be built `--target x86_64-apple-darwin`. The host default here is
+arm64, the oracle is x86_64, and the first build linked cleanly and would have compared two
+ABIs. Same trap as the staticlib-drop in `evidence-and-linkage.md`, in a new place; the
+script now carries a comment saying so.
+
+### Remaining
+
+The ~490 lines of `Decimal128` methods over the already-linkable BID functions, then wire
+the TU out of the hybrid and run the gate.

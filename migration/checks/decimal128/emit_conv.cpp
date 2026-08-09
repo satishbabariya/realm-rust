@@ -6,10 +6,13 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 namespace realm { namespace {
 #include "conv_block.inc"
 } }
+extern "C" unsigned __bid_IDEC_glbround;
 int main(){
+  if (const char* r = getenv("ROUND")) __bid_IDEC_glbround = (unsigned)atoi(r);
   uint64_t bits;
   while (fread(&bits, 8, 1, stdin) == 1) {
     double x; std::memcpy(&x, &bits, 8);
