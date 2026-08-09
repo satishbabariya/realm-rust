@@ -71,13 +71,13 @@ use crate::array_unsigned::{
 /// `realm::Array` / `realm::ArrayBlob` — identical layout; `ArrayBlob` adds no members.
 #[repr(C)]
 pub struct Array {
-    vptr_node: *const c_void,       // 0
-    m_data: *mut c_char,            // 8
-    m_ref: usize,                   // 16
-    m_alloc: *mut Allocator,        // 24
-    m_size: usize,                  // 32
-    m_parent: *mut c_void,          // 40
-    m_ndx_in_parent: c_uint,        // 48
+    pub(crate) vptr_node: *const c_void,       // 0
+    pub(crate) m_data: *mut c_char,            // 8
+    pub(crate) m_ref: usize,                   // 16
+    pub(crate) m_alloc: *mut Allocator,        // 24
+    pub(crate) m_size: usize,                  // 32
+    pub(crate) m_parent: *mut c_void,          // 40
+    pub(crate) m_ndx_in_parent: c_uint,        // 48
     m_missing_parent_update: bool,  // 52
     // 53..56 padding
     vptr_array_parent: *const c_void, // 56
@@ -85,18 +85,18 @@ pub struct Array {
     m_vtable: *const c_void,        // 80
     m_lbound: i64,                  // 88
     m_ubound: i64,                  // 96
-    m_width: u8,                    // 104
+    pub(crate) m_width: u8,                    // 104
     m_is_inner_bptree_node: bool,   // 105
     m_has_refs: bool,               // 106
-    m_context_flag: bool,           // 107
+    pub(crate) m_context_flag: bool,           // 107
     // 108..112 padding
 }
 
 /// `realm::BinaryData` — `{const char*, size_t}`, returned in `rax:rdx`.
 #[repr(C)]
 pub struct BinaryData {
-    data: *const c_char,
-    size: usize,
+    pub(crate) data: *const c_char,
+    pub(crate) size: usize,
 }
 
 const _: () = {
@@ -117,16 +117,16 @@ const _: () = {
 };
 
 /// Byte offset of the `ArrayParent` base subobject inside `Array`.
-const ARRAY_PARENT_SUBOBJECT_OFFSET: usize = 56;
+pub(crate) const ARRAY_PARENT_SUBOBJECT_OFFSET: usize = 56;
 
 /// `ArrayBlob::max_binary_size` = `0xFFFFF8 - Array::header_size`.
 const MAX_BINARY_SIZE: usize = 0xFF_FFF8 - 8;
 
 // NodeHeader::Type / WidthType, from node_header.hpp.
-const TYPE_NORMAL: i32 = 0;
-const TYPE_HAS_REFS: i32 = 2;
-const WTYPE_BITS: i32 = 0;
-const WTYPE_IGNORE: i32 = 2;
+pub(crate) const TYPE_NORMAL: i32 = 0;
+pub(crate) const TYPE_HAS_REFS: i32 = 2;
+pub(crate) const WTYPE_BITS: i32 = 0;
+pub(crate) const WTYPE_IGNORE: i32 = 2;
 
 extern "C" {
     /// The `ArrayBlob` and `Array` vtable groups. Both are `weak external` with several
@@ -216,12 +216,12 @@ unsafe fn construct(out: *mut Array, alloc: *mut Allocator, vtable: *const *cons
 }
 
 #[inline]
-unsafe fn new_array_blob(out: *mut Array, alloc: *mut Allocator) {
+pub(crate) unsafe fn new_array_blob(out: *mut Array, alloc: *mut Allocator) {
     construct(out, alloc, ARRAY_BLOB_VTABLE.as_ptr());
 }
 
 #[inline]
-unsafe fn new_array(out: *mut Array, alloc: *mut Allocator) {
+pub(crate) unsafe fn new_array(out: *mut Array, alloc: *mut Allocator) {
     construct(out, alloc, ARRAY_VTABLE.as_ptr());
 }
 
@@ -232,33 +232,33 @@ unsafe fn new_array(out: *mut Array, alloc: *mut Allocator) {
 /// `Array::get(ndx)` — `(this->*m_getter)(ndx)`, whose targets are all
 /// `Array::get_universal<w>`, which is the same function as `get_direct`.
 #[inline]
-unsafe fn array_get(this: *const Array, ndx: usize) -> i64 {
+pub(crate) unsafe fn array_get(this: *const Array, ndx: usize) -> i64 {
     get_direct((*this).m_data, (*this).m_width as usize, ndx)
 }
 
 /// `Array::get_as_ref(ndx)` — `to_ref(get(ndx))`. `to_ref` is a checked cast whose
 /// assertion is compiled out here, leaving the conversion.
 #[inline]
-unsafe fn array_get_as_ref(this: *const Array, ndx: usize) -> usize {
+pub(crate) unsafe fn array_get_as_ref(this: *const Array, ndx: usize) -> usize {
     array_get(this, ndx) as usize
 }
 
 /// `Array::add(value)` — `insert(m_size, value)`.
 #[inline]
-unsafe fn array_add(this: *mut Array, value: i64) {
+pub(crate) unsafe fn array_add(this: *mut Array, value: i64) {
     array_insert(this, (*this).m_size, value);
 }
 
 /// `Node::init_from_ref(ref)` — translate then `init_from_mem`.
 #[inline]
-unsafe fn array_init_from_ref(this: *mut Array, ref_: usize) {
+pub(crate) unsafe fn array_init_from_ref(this: *mut Array, ref_: usize) {
     let header = allocator_translate((*this).m_alloc, ref_);
     array_init_from_mem(this, MemRef { addr: header, ref_ });
 }
 
 /// `ArrayBlob::create()` — `create_array(0, alloc)` then `init_from_mem`.
 #[inline]
-unsafe fn array_blob_create(this: *mut Array) {
+pub(crate) unsafe fn array_blob_create(this: *mut Array) {
     let mem = array_create(TYPE_NORMAL, false, WTYPE_IGNORE, 0, 0, (*this).m_alloc);
     array_init_from_mem(this, mem);
 }
@@ -266,7 +266,7 @@ unsafe fn array_blob_create(this: *mut Array) {
 /// `Array::create(Type, bool)` — the member overload, which goes through
 /// `create_array(type, ctx, 0, 0, alloc)` and therefore `wtype_Bits`.
 #[inline]
-unsafe fn array_create_member(this: *mut Array, type_: i32, context_flag: bool) {
+pub(crate) unsafe fn array_create_member(this: *mut Array, type_: i32, context_flag: bool) {
     let mem = array_create(type_, context_flag, WTYPE_BITS, 0, 0, (*this).m_alloc);
     array_init_from_mem(this, mem);
 }
@@ -277,14 +277,14 @@ unsafe fn array_create_member(this: *mut Array, type_: i32, context_flag: bool) 
 /// is a **pointer adjustment of +56**, not a cast — `ArrayParent` is `Array`'s second
 /// base. Handled at the call site so the adjustment is visible there.
 #[inline]
-unsafe fn array_set_parent(this: *mut Array, parent: *mut c_void, ndx_in_parent: usize) {
+pub(crate) unsafe fn array_set_parent(this: *mut Array, parent: *mut c_void, ndx_in_parent: usize) {
     (*this).m_parent = parent;
     (*this).m_ndx_in_parent = ndx_in_parent as c_uint;
 }
 
 /// `Array*` viewed as the `ArrayParent*` its second base occupies.
 #[inline]
-unsafe fn as_array_parent(this: *mut Array) -> *mut c_void {
+pub(crate) unsafe fn as_array_parent(this: *mut Array) -> *mut c_void {
     (this as *mut u8).add(ARRAY_PARENT_SUBOBJECT_OFFSET) as *mut c_void
 }
 
@@ -366,7 +366,7 @@ pub unsafe extern "C" fn array_blob_get_at(this: *const Array, pos: *mut usize) 
 }
 
 /// Body of `ArrayBlob::replace`, shared with `ArrayBlob::add`.
-unsafe fn replace_impl(
+pub(crate) unsafe fn replace_impl(
     this: *mut Array,
     begin: usize,
     end: usize,
