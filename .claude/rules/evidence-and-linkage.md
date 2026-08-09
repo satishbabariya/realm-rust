@@ -81,6 +81,32 @@ The hybrid excludes C++ purely by **link order** — `librealm_core_rs.a` preced
 possible: `harness/**` and the `Makefile` are permission-denied by design. The comment
 in `harness/CMakeLists.txt` about a `build.rs` is wrong; there is no `build.rs`.
 
+## Choosing the shape of a differential
+
+Two shapes are in the tree and they are not interchangeable. Decide with `nm -u` on the
+unit's object **before** writing the harness, not after the link fails.
+
+| `nm -u <unit>.o` shows | Shape | Example |
+|---|---|---|
+| a short, self-contained undefined list (system libs only) | **single-object linking** — each driver links the one `.o` or the one Rust module | `run_interprocess_mutex_differential.sh` (4 undefined, all libdispatch) |
+| anything pulling in `util::Mutex`, `terminate`, or `Backtrace` | **whole-archive + link order** — both drivers link all of `librealm.a`, the Rust driver puts its staticlib first | `run_utilities_differential.sh` |
+
+Single-object linking fails on units with dependency chains: `utilities.cpp`'s
+file-static `util::Mutex` drags in `Mutex::*_failed` from `thread.cpp`, which drags in
+`terminate.cpp` and `backtrace.cpp`. Linking that chain object-by-object is a losing
+game.
+
+Prefer the archive shape when in doubt. It does not care how many TUs a unit depends
+on, and it exercises the exact mechanism `make hybrid` uses, so a link-order bug shows
+up in the differential rather than only in the gate.
+
+The guard changes with the shape. Single-object: each driver contains exactly one
+implementation, so the crate probe suffices. Archive: assert that the C++ object was
+*not extracted*, fingerprinting on an anonymous-namespace symbol from the unit
+(`a_popcount_bits` for `utilities.cpp`). Find that fingerprint symbol first — if the
+unit has none because it inlines everything into its exports (`string_data.cpp`), fall
+back to the crate probe.
+
 ## Get the ABI off the built object, not out of your head
 
 Ten minutes with `objdump -d` has twice settled something that would otherwise have

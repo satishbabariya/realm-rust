@@ -120,3 +120,22 @@ One thing did change, and it is worth flagging for whoever picks this up: the
 
 That does not unpark it. Cost was never the reason. Unreachability is, and it is
 unchanged.
+
+## Audit 2026-08-09 (reflection #2)
+
+Still blocked, still for the same reason: unreachable while `REALM_ENABLE_SYNC=OFF`.
+Six units are now ported and none of them touches reachability.
+
+The shared-cost note above has grown a third member. `obj_list.cpp` (#15) was parked on
+2026-08-09 needing the *same* vtable + RTTI synthesis — it is the key-function TU for
+`ObjList` and emits `_ZTV`/`_ZTI`/`_ZTS` from a 25-line body. So the group is now four:
+this unit, `util/basic_system_errors.cpp` (#8), `error_codes.cpp` (#13), and
+`obj_list.cpp` (#15) — see [`obj_list.md`](obj_list.md).
+
+Two of the four are live. Building the shim once is now the single highest-leverage
+piece of work available that does not require a project-level flag decision, and
+`obj_list` is the cheapest first customer (`__class_type_info` with no base, empty
+destructors, so vtable layout is the only thing under test).
+
+Unparking this one still requires `REALM_ENABLE_SYNC=ON` for both stacks, which is a
+project-level decision and out of this loop's scope under hard rule 3.

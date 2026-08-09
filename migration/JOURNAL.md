@@ -490,7 +490,7 @@ own piece of work rather than discovering it mid-port.
 
 ## Proposals for the human
 
-Neither of these was acted on. Both are outside what `/reflect` may change.
+None of these was acted on. All are outside what `/reflect` may change.
 
 1. **Give `migration/gen_queue.py` a reachability column** (symbols defined by the
    unit's `.o` ∩ symbols in the linked `trace_runner`) and sort zero-reachability units
@@ -507,6 +507,21 @@ Neither of these was acted on. Both are outside what `/reflect` may change.
    pass. This is a coverage gap in the gate, not a weakening of it — the request is to
    make `diff-test` see *more*, and `index_string.cpp` (#50) should not be attempted
    until a trace builds an index.
+
+3. **`make shim-report` counts imports as shims.** Added 2026-08-09 (reflection #2).
+   The health number is `grep -c 'TODO(shim)\|unimplemented!\|extern "C"'` over
+   `crates/`, so `extern "C" { fn timegm(tm: *mut Tm) -> i64; }` — a declaration of a
+   libc function the C++ called too — scores identically to an `unimplemented!()`. Four
+   of the current 33 points are import blocks of that kind, and the ABI's mandatory
+   `C1`/`C2` and `D1`/`D2` duplicates inflate the rest: `interprocess_mutex` scores 7 for
+   a three-method class. The metric will therefore rise steadily as the port moves to
+   class-shaped units, for reasons unrelated to spreading, and the rule that reads two
+   consecutive rises as "stop and consolidate" will misfire. Suggested refinement:
+   count only `TODO(shim)`, `unimplemented!`, `todo!`, and symbols exported by a unit
+   that is *not* listed in `ported_units.txt` — the last being the actual definition of
+   the port spreading. I have not touched the Makefile: it is part of how the project
+   defines its health, and hard rule 2 covers the spirit of this even though the
+   Makefile is not `harness/`.
 
 ---
 
@@ -760,3 +775,124 @@ for building it once, deliberately, than any of them made alone.
 `obj_list` is probably the right *first* customer if it is ever built: `__class_type_info`
 with no base class is the simplest RTTI shape in the group, and its destructors are
 empty, so the vtable layout is the only thing under test.
+
+---
+
+## 2026-08-09 — reflection #2 (convergence check, and the screen becomes a rule)
+
+Covers `1057f60` (reflection #1) through `0172003`.
+
+**Units attempted: 4. Landed: 3.** `util/sha_crypto.cpp` (#31), `utilities.cpp` (not in
+the first 60 by depth but pulled in as a dependency target), `util/interprocess_mutex.cpp`.
+Parked: `obj_list.cpp` (#15). Rejected before any code was written: `uuid.cpp` (#24,
+throws), and one further candidate on STL-by-value returns.
+
+**What `make verify` actually reported.** Exit 0 at `rust units ported = 6`, recorded at
+`599894a`. Determinism, diff-test, format-compat and fault-check all as at reflection #1;
+no `.realm` divergence has been observed outside the deliberate negative controls, in
+this window or any previous one. Three of the six ported units also carry a hand-written
+differential in `migration/checks/` because `diff-test` cannot see them
+(525 probe lines for sha_crypto, 108 for utilities, 28 for interprocess_mutex). `obj_list`
+landed as a park, so no verify applies to it.
+
+### Convergence
+
+| | reflection #1 (2026-08-08) | reflection #2 (today) |
+|---|---|---|
+| C++ TUs in `upstream/src/realm` | 230 | 230 |
+| Rust source files | 5 | 8 |
+| shim / extern-C boundary points | 12 | 33 |
+| units ported | 3 | 6 |
+| **boundary points per ported unit** | **4.0** | **5.5** |
+| `TODO(shim)` + `unimplemented!` | 0 | 0 |
+
+Reflection #1 named the number to watch: boundary points per ported unit. It rose, 4.0
+to 5.5. That is **one** rise, not the two consecutive rises that the convergence rule
+treats as spreading, so this is a note rather than a recommendation to stop and
+consolidate. But it is worth decomposing now so reflection #3 can read the trend
+correctly rather than re-deriving it:
+
+- Of the 33 grep hits, **4 are `extern "C" {` import blocks** declaring system routines
+  (`timegm`, three `dispatch_semaphore_*`, four CommonCrypto entry points). Those are not
+  shims in any meaningful sense; they are the unit calling the same libc/system functions
+  the C++ called.
+- `util/interprocess_mutex.cpp` alone contributes 7 exports for a class with **three
+  methods**, because the Itanium ABI demands `C1`/`C2` and `D1`/`D2` pairs. Four of its
+  seven symbols are ABI duplicates, not new surface.
+- `utilities.cpp` contributes 9, including the first two *data* symbols
+  (`sse_support`, `avx_support`).
+
+So the rise is almost entirely "the units being ported turned class-shaped", not "units
+are being half-ported". The distinguishing measurement is the last row: `TODO(shim)` and
+`unimplemented!` are still at zero, meaning every unit in `ported_units.txt` is served
+completely from Rust and nothing is straddling the boundary. **Reflection #3 should read
+those two rows together.** Per-unit rising *with* zero incomplete shims is the ABI tax on
+class-shaped units. Per-unit rising *with* non-zero incomplete shims, or with the same
+unit appearing on both sides of the boundary, is the spreading signal the rule is
+actually about. If #3 shows per-unit up again and that decomposition no longer explains
+it, stop adding units.
+
+### The pattern that became a rule
+
+Four consecutive sessions each produced a new step of the same pre-port screen, and each
+discovered it the same way — by rejecting a candidate *after* reading its source, or
+after starting work:
+
+| Session | Step discovered |
+|---|---|
+| `sha_crypto` | `grep -c throw`; STL-by-value returns (`uuid.cpp` died here) |
+| `utilities` | static-initialiser dependencies (`cpuid_init` was called explicitly — it might not have been) |
+| `interprocess_mutex` | `nm -g` for *every* exported symbol, including C1/C2 and D0/D1/D2 |
+| `obj_list` | `nm \| grep -E "ZTV\|ZTI\|ZTS"` — does this TU own a class's vtable? |
+
+Each was written down in its own "for the next unit" section, in slightly different
+words, and the next session extended the list again. That is the identical failure mode
+reflection #1 fixed for observability, so it gets the identical fix: promoted to
+`.claude/rules/unit-screening.md`, with the seven steps in cost order, the reasoning for
+each, and the note that steps 1–4 are all `nm` on one object. Reachability stays in
+`evidence-and-linkage.md` and is cross-referenced rather than duplicated.
+
+Also promoted, to `evidence-and-linkage.md` rather than a new file, because it is about
+proof and that file owns proof: **choosing the differential shape from `nm -u`**. Two
+occurrences (utilities discovered it by dependency explosion, interprocess_mutex applied
+it and chose the other branch) is the threshold, and a table of two shapes with the
+deciding measurement is more useful than the two prose accounts it replaces.
+
+Deliberately **not** promoted: `CC_LONG` truncating to 32 bits, `platform_timegm`'s
+2038 wrap, the `fastrand` `UINT64_MAX` special case, `cpuid_init` always reporting no
+AVX under clang. All single occurrences and all unit-specific. They stay in their
+entries. The rules files are trusted in proportion to how rarely they churn.
+
+### Blocked directory audit
+
+Eight entries. **Seven are the same measurement applied seven times** — unreachable with
+`REALM_ENABLE_SYNC=OFF` — and nothing ported in this window changes that; porting
+`sha_crypto` does not make `sync/` reachable. Unblocking them all requires the same
+project-level flag decision, which hard rule 3 puts out of scope.
+
+The eighth, `obj_list`, is new and is a different species: live, reachable, and parked on
+ABI cost. That matters for the health read. A loop that only ever parks dead code is
+possibly just measuring reachability; this window parked something it could see and chose
+not to guess at, which is the behaviour the park mechanism is for.
+
+One cross-link added in both directions: `obj_list` joins the vtable/RTTI group that
+`misc_ext_errors` already flagged, alongside `basic_system_errors` (#8) and `error_codes`
+(#13). **Four units, two of them live, all waiting on one shim.** Both entries now say so
+and both name `obj_list` as the cheapest first customer.
+
+### What would most speed up the next session
+
+Build the vtable + RTTI shim as its own deliberate unit of work, with its own
+differential, starting from `obj_list`. It is the only thing in the queue that unblocks
+more than one unit, two of its four dependents are live and gateable, and every session
+since 2026-08-08 has hit it and gone around.
+
+### A note on the shim-report metric itself, not acted on
+
+`make shim-report` counts `grep -c 'TODO(shim)\|unimplemented!\|extern "C"'`, so an
+`extern "C" { fn timegm(...) }` block — a *call into* the system, present in the C++ too —
+scores the same as an unimplemented shim. As the port moves to class-shaped units the
+count will keep rising for reasons that have nothing to do with spreading. I have not
+touched the Makefile; the metric is part of how this project defines its health and
+changing it is not this skill's call. The decomposition above is offered as the way to
+read it instead, and the entry below records the suggestion properly.

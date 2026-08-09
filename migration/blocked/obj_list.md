@@ -77,3 +77,17 @@ differential. That decision now gates four units — this one, `misc_ext_errors`
 building it once than any of them made individually.
 
 Did not touch a trace, the comparator, the Makefile, or `upstream/`.
+
+## Audit 2026-08-09 (reflection #2)
+
+Still blocked; parked earlier the same day, so nothing has changed underneath it.
+
+Recorded here so the next `/port-unit` sees it: **this is the only member of the
+vtable/RTTI group that is both live and cheap.** `misc_ext_errors` is unreachable and
+cannot be gated at all; `basic_system_errors` (#8) and `error_codes` (#13) are live but
+carry `std::error_category` subclassing on top of the vtable work. If the shim is built,
+build it here.
+
+The screening lesson from this entry has been promoted out of the journal into
+`.claude/rules/unit-screening.md`, which now carries the full ordered screen (the
+vtable check is step 2, before the source is read).
