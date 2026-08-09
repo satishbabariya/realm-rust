@@ -2637,3 +2637,65 @@ Two cheap things that would compound:
   `.claude/settings.json` or `.claude/hooks/`.**
 
 ---
+
+---
+
+## 2026-08-09 — `util/demangle.cpp` parked; the "dead payload" pattern reaches two occurrences
+
+Queue #18. ~10 minutes. Parked on step 5 and on payload reachability; **not** on step 2.
+Details in `migration/blocked/util-demangle.md`.
+
+Loop note: the loop's stop condition fired last tick (boundary count rose across two
+reflections) and the loop was stopped and reported. The human said continue, so work
+resumed without the cron. The metric issue is unchanged and still theirs to decide.
+
+### The finding: 5-of-6 linked, and the missing one is the whole unit
+
+Reflection #5's realm-only step-1 filter reports `util/demangle` at 5 of 6 symbols
+linked — which reads as "almost fully reachable". The symbol that is *not* linked is
+`realm::util::demangle(const std::string&)`, the unit's only real function. The five
+that are linked are `ExceptionWithBacktrace<std::bad_alloc>` scaffolding — default
+constructor, both destructor variants, `what()`, `message()` — present because the unit
+instantiates the template, not because anything calls `demangle`.
+
+**Second confirmed occurrence**, after `util/compression` #14 (12 of 34 linked, none of
+them a compression function). Two occurrences is this project's bar for promotion, so
+the addendum `util/compression`'s park proposed is now ready for the rules file rather
+than living in two park entries:
+
+> When the linked subset is a strict subset, check whether it contains the functions the
+> unit is *named for*. A high ratio is not the test — a unit whose payload is dead and
+> whose exception or accessor scaffolding is live reads as "mostly reachable" and is
+> worth nothing to the gate.
+
+Mechanically: intersect the linked set with the unit's *primary* exports, not with every
+realm symbol the object happens to define. Reflection #5 fixed the filter's
+libc++-vs-realm axis; this is the second axis, realm-scaffolding-vs-realm-payload.
+
+### Step 2 continues not to apply, three units running
+
+Definer counts: 2 for `ExceptionWithBacktrace<std::bad_alloc>`'s `ZT*`, 5 for
+`ExceptionWithBacktraceBase`'s. All coalesced. `util/time`, `util/demangle` and (for
+four of its seven) `util/compression` would all have been parked by the pre-#5 reading
+of step 2 for a reason that does not exist. The definer-count amendment is earning its
+keep immediately.
+
+### Step 5 applies
+
+`throw util::bad_alloc{}` at the `-1` status branch, and the owning-function test puts
+the EH site in `realm::util::demangle` itself. `util::bad_alloc` is
+`ExceptionWithBacktrace<std::bad_alloc>`, so it needs the exception shim *and*
+`Backtrace::capture()` from the parked `util/backtrace.cpp` — the same transitive block
+as `util/time`.
+
+But payload-reachability makes that moot here: even with both shims, `demangle` is not
+linked, so porting it would be unmeasurable. Recommend it stays C++ permanently unless
+something starts calling it.
+
+### Queue observation, third occurrence
+
+`util/demangle` #18 sorts ahead of `object_id` #25 and `util/to_string` #27, both of
+which screen fully clean. That is now four units (`util/compression` #14, `version` #19,
+`util/demangle` #18, `util/resource_limits` #23) where `gen_queue.py`'s size-and-depth
+ranking pointed the loop at dead or unportable code ahead of live clean units.
+Reflection #5 sharpened this as proposal #1; this entry is its fourth data point.
