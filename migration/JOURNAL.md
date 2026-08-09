@@ -2160,3 +2160,59 @@ was not extracted", and the differential asserts it in both directions.
   module is a refactor that should be done once for all units, not smuggled into a port.
 - `panic = "abort"` means `std::bad_alloc` from the three vector allocations aborts
   rather than propagating. Same divergence `base64` documented.
+
+---
+
+## 2026-08-09 — `util/compression.cpp` parked on three independent grounds
+
+Queue #14, the first unit neither ported nor blocked. ~10 minutes — the fastest screen
+yet, and the first one where the corrected rules did their job without a correction of
+their own. Details in `migration/blocked/util-compression.md`.
+
+Parked on step 2 **and** step 5 **and** reachability, any one of which suffices:
+
+- **19 `ZT*` defined**, making it the key-function TU for seven classes. Four are
+  externally visible (`S`): `SimpleInputStream`, `CompressMemoryArena`, and the abstract
+  `InputStream` and `compression::Alloc`. Two of those are consumed by *other*
+  translation units — `SimpleInputStream`'s vtable and `InputStream`'s typeinfo are in
+  the linked binary. `util/basic_system_errors` needed one synthesized vtable over a
+  libc++ base; this needs seven, four of them part of realm's public ABI.
+- **Five `throw std::system_error`**, and the reflection-#4 owning-function test puts
+  three EH sites in `realm::` functions (`allocate_and_compress_nonportable`,
+  `decompress_nonportable_input_stream`, `DecompressInputStreamLibCompression::next_block`),
+  cleanly separated from the `___clang_call_terminate` and `std::__throw_length_error`
+  owners that mean "ignore".
+- **12 of 34 symbols linked, and not one of them is a compression function.**
+  `compression::decompress`, `compress_bound`, `error_category`, `make_error_code`,
+  `CompressMemoryArena::alloc`/`free` are all absent from `trace_runner`. What survives
+  is the `InputStream`/`SimpleInputStream` vtable, RTTI, `next_block`, two destructor
+  variants and `Buffer<char>::resize`.
+
+### The reachability finding is the interesting one
+
+Both shims could exist and porting this unit would still be unmeasurable, because the
+part a port would be *about* is never linked. That is the "unreachable" category of
+`evidence-and-linkage.md` applied to a *subset* of a unit — a case the rule does not
+currently name. The existing categories classify a unit as a whole; here the unit splits,
+with live scaffolding and dead payload.
+
+Worth a rule amendment: **when step 1 shows partial linkage, check whether the linked
+subset contains the functions the unit is named for.** 12/34 sounds like "mostly
+reachable" and means the opposite here. Proposed for reflection #5 rather than edited in.
+
+### It also says something about the queue
+
+`gen_queue.py` ranks by include depth then line count. 947 lines of zlib/libcompression
+wrapper scores high on size while contributing nothing the harness can observe, so it
+sorted ahead of `status` (#17, 47 lines), `object_id` (#25) and `util/to_string` (#27),
+all of which screened clean at reflection #4. Size is a proxy for *effort*, not for
+*value*, and the queue has no column for the latter.
+
+Not acting on it — `migration/queue.md` is not hand-editable and reordering is a
+`gen_queue.py` change. But three of the last four parks (`util/compression`,
+`util/resource_limits`, `util/json_parser`) were units whose queue position came from
+size, and the two units that landed were reached by skipping past them.
+
+### Loop state
+
+One park, following two landed units. Consecutive parks: 1. No stop condition near.
