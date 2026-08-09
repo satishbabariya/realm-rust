@@ -17,7 +17,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ORACLE_DIR="$ROOT/build/oracle"
-WORK="$ROOT/build/out/array-unsigned-diff"
+WORK="$ROOT/build/out/error-codes-diff"
 
 HOST_ARCH="$(uname -m)"
 case "$HOST_ARCH" in

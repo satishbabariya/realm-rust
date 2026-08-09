@@ -2286,3 +2286,118 @@ so changed an outcome prospectively.
 Two consecutive parks (`util/compression`, `util/time`), following two landed units.
 Stop condition is three. `status` (#17) screens clean — 7/7 symbols linked, zero `ZT*`,
 zero `throw`/`catch`/`try` — and is the next unit.
+
+---
+
+## 2026-08-09 — `status.cpp` ported. `format-compat` caught a segfault that `diff-test` did not.
+
+`make verify` exits 0 at `rust units ported = 9`.
+`migration/checks/run_status_differential.sh` exits 0 on 198 probe lines. ~60 minutes,
+most of it on one ABI mistake and one differential that lied.
+
+47 lines, four exported symbols: the `ErrorInfo` constructor (`C1` and `C2` variants),
+`ErrorInfo::create`, and `operator<<(ostream&, const Status&)`.
+
+### The bug: `bind_ptr` returns via `sret`, and size does not decide that
+
+`ErrorInfo::create` returns `util::bind_ptr<ErrorInfo>` — **one pointer**. I declared it
+as returning an 8-byte struct, which Rust returns in `rax`. Wrong.
+
+`bind_ptr` has a user-provided destructor (`~bind_ptr() { unbind(); }`) and a
+user-provided copy constructor. Under the Itanium ABI that makes it **MEMORY class
+regardless of size**: hidden result pointer in `rdi`, and the callee returns that same
+pointer in `rax`. So every argument was shifted by one — `reason` received the value of
+`code`, a small integer, and was dereferenced as a `std::string*`.
+
+The oracle's own prologue says it plainly, and reading it took a minute:
+
+```
+6a: movq %rdx, %rbx     ; reason  = 3rd argument
+6d: movl %esi, %r14d    ; code    = 2nd argument
+70: movq %rdi, %r15     ; sret    = 1st argument
+73: movl $0x20, %edi    ; operator new(32)
+```
+
+**The rule to carry: triviality decides the return class, not size.** Any C++ type with
+a user-provided destructor, copy constructor or move constructor comes back through
+memory even if it is a single pointer. `base64`'s `optional<size_t>` (16 bytes, trivial)
+came back in registers; this (8 bytes, non-trivial) does not. Proposed for reflection #5
+as an addition to step 6, which currently only warns about `std::string`/`std::vector`
+by value.
+
+### `make format-compat` earned its place
+
+`make diff-test` passed **5/5** with this bug in the tree. Not by luck: no trace
+constructs an error `Status`, so `ErrorInfo::create` is never called on the trace path.
+
+`format-compat` failed 9 of 23 corpus files with `hybrid exit=139` — and the nine were
+exactly the files the **oracle rejects** (`oracle exit=1`). Opening a corrupt or
+too-old realm is what builds an error `Status`. The check that compares *rejection
+behaviour* on files both stacks refuse is the one that found it, and until now those
+rows had only ever printed `skip … both stacks reject it (exit 1) — agreement is the
+check`. That line is doing real work.
+
+Worth stating for the category table in `evidence-and-linkage.md`: a byte-invisible unit
+can still be caught by the gate, just not by `diff-test`. The error path is exercised by
+`format-compat` and by nothing else.
+
+### The differential lied once, and the fix generalises
+
+First version reported **PASS** with the reference count deliberately set one too high.
+Section 6 claimed to test refcounts by making copies — but bind/unbind are symmetric, so
+an extra count is a *leak*, and a leak changes no printed value.
+
+Fixed by replacing global `operator new`/`operator delete` in the driver with counting
+versions and printing the net balance over a block whose `Status`es are all destroyed.
+The Rust port calls the same `_Znwm`, so the counters see its allocations too. With that
+line present, the off-by-one refcount fails the check; without it, nothing does.
+
+**General form: a differential can only see what it prints.** For anything whose failure
+mode is a leak, a double free, or an extra allocation, the driver has to make the
+resource accounting itself an output. Both this unit and `base64` (capacity) needed a
+number that no caller would ever look at.
+
+Also replaced the differential's `lines -lt N` completeness guard with a check that the
+last line is a literal `done` terminator — the line count had to be re-tuned per unit and
+silently passes a driver that died one case early. Applied to this script; the other
+five still use line counts.
+
+Also fixed: `run_error_codes_differential.sh` and `run_status_differential.sh` were both
+writing into `build/out/array-unsigned-diff`, inherited from the script they were copied
+from. Harmless but confusing, and it meant each run clobbered the previous unit's
+artifacts.
+
+### Layouts, measured
+
+```text
+struct realm::Status::ErrorInfo                 [sizeof=32]
+  0 | atomic<uint32_t>        m_refs
+  4 | const ErrorCodes::Error m_code
+  8 | std::string             m_reason
+
+class realm::util::bind_ptr<ErrorInfo>          [sizeof=8]   (bind_ptr_base is empty)
+class realm::Status                             [sizeof=8]
+```
+
+`std::string` in this libc++ is 24 bytes with **`__is_long_` in the LOW bit** — older
+libc++ put it in the high bit of the first word, and code written from memory of that
+layout reads every short string as long:
+
+```text
+short:  byte 0: bit 0 = is_long (0), bits 1..7 = size;  bytes 1..23 = data
+long:   word 0: bit 0 = is_long (1), bits 1..63 = cap;  word 1 = size;  word 2 = data
+```
+
+The port only reads and moves strings — never allocates, reallocates or frees one. Move
+is "copy 24 bytes, zero the source", which is exactly `__default_init()`: a valid empty
+short string that owns nothing, so the caller's destructor does not free the buffer the
+port just took. The object file's undefined `_memset` is the C++ doing the same.
+
+### Assumptions
+
+- `bind_ptr(T*)` binds, so `create` returns a count of 1 (`m_refs` starts at 0, one
+  `fetch_add`). Now checked by the allocation balance.
+- For an OK `Status`, `operator<<` streams a zero-length sequence rather than reading
+  `Status::reason() const::empty`, the weak inline-function-local static. Two definers in
+  `librealm.a`, so it survives in both builds and is not a usable fingerprint — the
+  differential falls back to the crate probe plus an address-distance check.
