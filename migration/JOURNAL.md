@@ -1069,3 +1069,56 @@ worse than not starting.
 
 The analysis above is the expensive part and it is now done. A session starting fresh
 can go straight to the record layout dump.
+
+---
+
+## 2026-08-09 — `ArrayUnsigned` record layout, taken from the compiler
+
+The prerequisite the previous entry named. Answered with
+`clang -Xclang -fdump-record-layouts` rather than by reading the header, and the answer
+matters: **`Node` is polymorphic.** There is a vtable pointer at offset 0, so every
+field is shifted by 8 and a Rust struct written from the header declaration order would
+have been wrong in every member.
+
+```
+*** class realm::ArrayUnsigned                       [sizeof=64, align=8]
+  0  | class realm::Node (primary base)
+  0  |   (Node vtable pointer)
+  0  |   class realm::NodeHeader (base) (empty)
+  8  |   char*         m_data
+ 16  |   size_t        m_ref
+ 24  |   Allocator&    m_alloc                  (a reference: one pointer)
+ 32  |   size_t        m_size
+ 40  |   ArrayParent*  m_parent
+ 48  |   unsigned int  m_ndx_in_parent          (4 bytes)
+ 52  |   _Bool         m_missing_parent_update  (1 byte)
+ 53  | uint_least8_t   m_width                  (1 byte)
+ 56  | uint64_t        m_ubound
+```
+
+`realm::Node` alone is `sizeof=56, dsize=53`; `ArrayUnsigned` adds `m_width` at 53 —
+into the tail padding of the base, which is exactly the kind of packing that hand-written
+layouts get wrong.
+
+### Correction to the previous entry
+
+That entry listed `m_no_relocation` as a `Node` member, taken from a grep of `node.hpp`.
+It is not in `Node`'s layout — it belongs to some other class declared in the same
+header. The layout above supersedes it. This is a small illustration of the same rule the
+entry itself stated and I then failed to follow: take offsets from the build, not from
+reading the header.
+
+### What this settles
+
+- **No vtable synthesis is needed.** `array_unsigned.cpp` is not the key-function TU for
+  `ArrayUnsigned`, so its vtable is emitted elsewhere and the Rust port never has to
+  build one. The unit stays on the clean side of the shim decision.
+- **The Rust side must never construct or destroy these objects**, only operate on a
+  `this` pointer supplied by C++. With a vptr at offset 0 that is not a limitation worth
+  fighting: field access at fixed offsets is all the ported methods need.
+- The Rust view should be `#[repr(C)]` with an explicit `_vptr: *const c_void` first
+  member, and `const_assert!(size_of::<ArrayUnsigned>() == 64)` — per
+  `.claude/rules/format-fidelity.md`, anything whose size matters gets an assertion.
+
+The port itself is still not started, for the reason given in the previous entry. What
+is now removed is its single largest source of silent corruption.
