@@ -25,3 +25,4 @@ array_unsigned.cpp
 error_codes.cpp
 status.cpp
 object_id.cpp
+array_blob.cpp

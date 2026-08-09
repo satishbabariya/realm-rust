@@ -94,8 +94,8 @@ pub struct RefTranslation {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MemRef {
-    addr: *mut c_char,
-    ref_: usize,
+    pub(crate) addr: *mut c_char,
+    pub(crate) ref_: usize,
 }
 
 /// `realm::ArrayUnsigned`. See the module comment for the measured offsets.
@@ -222,7 +222,7 @@ const THIS_FILE: &[u8] = b"upstream/src/realm/array_unsigned.cpp\0";
 const HEADER_SIZE: usize = 8;
 
 #[inline]
-unsafe fn get_data_from_header(header: *mut u8) -> *mut u8 {
+pub(crate) unsafe fn get_data_from_header(header: *mut u8) -> *mut u8 {
     header.add(HEADER_SIZE)
 }
 
@@ -232,7 +232,7 @@ unsafe fn get_header_from_data(data: *mut u8) -> *mut u8 {
 }
 
 #[inline]
-unsafe fn get_size_from_header(header: *const u8) -> usize {
+pub(crate) unsafe fn get_size_from_header(header: *const u8) -> usize {
     ((*header.add(5) as usize) << 16) + ((*header.add(6) as usize) << 8) + (*header.add(7) as usize)
 }
 
@@ -276,7 +276,7 @@ unsafe fn set_width_in_header(mut value: c_int, header: *mut u8) {
 /// unreachable from `_get`, which handles 8/16/32 itself, but it is mirrored because
 /// `lower_bound` reaches `get_direct` for other widths.
 #[inline]
-unsafe fn get_direct(data: *const c_char, width: usize, ndx: usize) -> i64 {
+pub(crate) unsafe fn get_direct(data: *const c_char, width: usize, ndx: usize) -> i64 {
     let d = data as *const i8;
     match width {
         0 => 0,
@@ -420,13 +420,13 @@ unsafe fn load_unsigned(data: *const c_char, ndx: usize, elem_bytes: usize) -> u
 
 /// `Allocator::is_read_only(ref)` — `alloc.hpp:539`.
 #[inline]
-unsafe fn allocator_is_read_only(alloc: *const Allocator, ref_: usize) -> bool {
+pub(crate) unsafe fn allocator_is_read_only(alloc: *const Allocator, ref_: usize) -> bool {
     ref_ < (*alloc).m_baseline.load(Ordering::Relaxed)
 }
 
 /// `Allocator::translate(ref)` — `alloc.hpp:568`.
 #[inline]
-unsafe fn allocator_translate(alloc: *mut Allocator, ref_: usize) -> *mut c_char {
+pub(crate) unsafe fn allocator_translate(alloc: *mut Allocator, ref_: usize) -> *mut c_char {
     let ptr = (*alloc).m_ref_translation_ptr.load(Ordering::Acquire);
     if !ptr.is_null() {
         allocator_translate_critical(alloc, ptr, ref_)

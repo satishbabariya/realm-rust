@@ -3197,3 +3197,105 @@ two-vptr layout, both vptr offsets, `max_binary_size`, and which paths construct
 objects — is now above. There is no remaining prerequisite. The next iteration writes
 the Rust or parks the unit with a diagnosis; a second scoping pass is the failure mode,
 not the work.
+
+---
+
+## 2026-08-09 — `array_blob.cpp` landed. The gate catches a width bug on **all five traces**.
+
+`make verify` exits 0 at `rust units ported = 11`. ~1 hour across two iterations. The
+"land or park next iteration" commitment made in the scoping entry was met.
+
+### The strongest gate result so far
+
+Two bugs injected into the landed Rust, both failing **5/5 traces**:
+
+| injected bug | `make diff-test` |
+|---|---|
+| `node_alloc(this, new_size, **2**)` — element width 1 → 2 | **FAIL on all five** |
+| appended data length off by one | **FAIL on all five** |
+
+Compare `array_unsigned`, which until now was the only unit the gate had ever judged: a
+broad width bug failed 2 of 5 there, and a narrow one (differing only at `value ==
+65536`) failed **none**. This unit is the first where a plain element-width error is
+caught everywhere. That is what "byte-visible and traced" is supposed to feel like.
+
+### Coverage, measured per function rather than per unit
+
+lldb breakpoints on all four exported symbols, hit counts across the five traces:
+
+| function | smoke | string_widths | erase_churn | many_commits | width_boundaries |
+|---|---|---|---|---|---|
+| `ArrayBlob::replace` | 3 | 46 | 13 | 29 | 19 |
+| `Array::blob_replace` | 0 | 0 | 0 | 0 | 0 |
+| `ArrayBlob::get_at` | 0 | 0 | 0 | 0 | 0 |
+| `ArrayBlob::verify` | 0 | 0 | 0 | 0 | 0 |
+
+One of four functions, 110 calls — but it is the one that writes every byte. The other
+three still need the differential; `verify` is empty in this build so only two really do.
+
+Note the breakpoint approach is cheaper than the counter instrumentation used for
+`array_unsigned`: no rebuild, and it works on the shipped binary. Worth preferring.
+
+### The new ABI ground: multiple inheritance
+
+`Array : public Node, public ArrayParent` — 112 bytes with **two** vptrs, against
+`ArrayUnsigned`'s 64 bytes with one.
+
+- Constructing one sets both. Measured from a real object, since
+  `-fdump-vtable-layouts` emits nothing for a non-key-function TU: primary vptr at
+  `&vtable[2]`, `ArrayParent` vptr at `&vtable[10]`, for both `Array` and `ArrayBlob`.
+- **Passing `this` where an `ArrayParent*` is wanted adds 56.** `blob_replace` does
+  `lastNode.set_parent(this, …)` and that is a pointer adjustment, not a cast. Wrong
+  here would store a plausible-looking pointer that dispatches into the wrong vtable.
+
+The port *uses* these vtables; it does not synthesize them. Definer counts are 4
+(`ArrayBlob`), 24–34 (`Array`), 38 (`ArrayParent`), so removing this TU orphans nothing.
+
+### The surface was smaller than the scoping entry feared
+
+I recorded that `Array::get`, `get_as_ref`, `add` and `ArrayBlob::create_array` have
+**zero** out-of-line definitions in `librealm.a` — verified with two different greps
+after getting a linkage claim wrong once before — and briefly took that to mean a shared
+`Array` accessor layer was a prerequisite. It is not: all four are one-liners over things
+that *are* callable.
+
+- `Array::get(ndx)` is `(this->*m_getter)(ndx)`, and every `m_getter` target is
+  `Array::get_universal<w>` — **byte-for-byte the same function** as `array_unsigned`'s
+  `get_direct`. Reusing it skips decoding a pointer-to-member entirely.
+- `Array::add(v)` is `insert(m_size, v)`, and `Array::insert` is out-of-line.
+- `ArrayBlob::create_array(n, a)` is `Array::create(type_Normal, false, wtype_Ignore, n,
+  0, a)`, and that static is out-of-line.
+
+Generalisable: **"no out-of-line definition" is not the same as "must build
+infrastructure".** Ask what the inline body actually *is* first. I nearly parked a
+portable, traced, byte-visible unit on that confusion.
+
+`array_unsigned`'s `get_direct` and allocator helpers were made `pub(crate)` and reused
+rather than copied — a visibility-only change to a verified module.
+
+### Format decisions
+
+- `node_alloc(this, new_size, **1**)` — a blob is bytes, width 1. This is the value both
+  negative controls perturbed and it fails every trace.
+- `m_data` is re-read **after** `alloc`, which may relocate the node. Reading it before
+  would be a use-after-free that the traces would catch, but only by luck of timing.
+- **An upstream bug, mirrored deliberately.** In `Array::blob_replace`'s append path:
+  ```cpp
+  size_t space_left = max_binary_size - lastNode.size();
+  size_t size_to_copy = std::min(space_left, data_size);
+  lastNode.add(data, size_to_copy);
+  data_size -= space_left;   // <- space_left, not size_to_copy
+  data += space_left;
+  ```
+  When `data_size < space_left` this underflows and the following loop runs with a huge
+  count. Reproduced with `wrapping_sub`, commented as an upstream bug rather than
+  "fixed": the path is only reached for data larger than a full node, and changing it
+  would change which nodes the data lands in — a file-format decision, not a cleanup.
+- `BinaryData{"", 0}` returns a pointer to a string literal, not null. Mirrored with a
+  static empty array; callers do distinguish.
+
+### Next
+
+Differential for `Array::blob_replace` and `ArrayBlob::get_at`, neither of which any
+trace reaches. `get_at` needs a context-flag (split) blob; `blob_replace` needs a blob
+over 16 MB or a full replace.
