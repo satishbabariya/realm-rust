@@ -99,3 +99,26 @@ All three of:
 
 Item 3 is the one to settle first: if the compression entry points are never linked,
 items 1 and 2 buy nothing here.
+
+## Audit 2026-08-09 (during the `util/time` screen)
+
+**The park stands.** The "key-function TU" wording above is loose — four of the seven
+`ZT*` symbols are `weak external`, not strong, so they are not key-function emissions in
+the strict sense. The conclusion is unaffected, because what matters is the **definer
+count**, and this object is the sole definer of every one of them:
+
+```
+nm -m librealm.a | grep " <symbol>$" | grep -vc undefined
+  vtable   for realm::util::SimpleInputStream                1
+  vtable   for realm::util::compression::CompressMemoryArena 1
+  typeinfo for realm::util::InputStream                      1
+  typeinfo for realm::util::compression::Alloc               1
+```
+
+Removing this TU orphans all four, so a port must synthesize them. The three
+anonymous-namespace classes are `non-external` and therefore definer-count 1 by
+construction.
+
+Contrast `util/time.cpp`, screened the same day: its `ZT*` are also `weak external` but
+have **5** definers, so removing that TU orphans nothing and step 2 does not apply to it
+at all. See `migration/blocked/util-time.md` for the amendment this produced.

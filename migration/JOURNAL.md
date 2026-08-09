@@ -2216,3 +2216,73 @@ size, and the two units that landed were reached by skipping past them.
 ### Loop state
 
 One park, following two landed units. Consecutive parks: 1. No stop condition near.
+
+---
+
+## 2026-08-09 — `util/time.cpp` parked, and step 2 over-parks: the definer count is the test
+
+Queue #16. Parked on step 5, and **explicitly not on step 2**, which is where the screen
+sent it. ~20 minutes. Details in `migration/blocked/util-time.md`.
+
+### The unit
+
+48 lines, two functions, four `throw util::invalid_argument(...)` between them. The
+owning-function test puts every EH site in `realm::util::localtime` / `gmtime` — not
+libc++ spill. `util::invalid_argument` is `ExceptionWithBacktrace<std::invalid_argument>`,
+so throwing it from Rust needs the exception shim *and* `Backtrace::capture()`, which
+lives in the already-parked `util/backtrace.cpp`. Directly and transitively blocked.
+
+### The correction: step 2 over-parks, and by how much is measurable
+
+Step 2 says a defined `ZT*` means "the compiler emits the vtable, typeinfo and
+typeinfo-name **here and nowhere else**". That is true only for a class with a **key
+function** — the first non-inline, non-pure virtual. Two common cases have no key
+function at all:
+
+- a class whose virtuals are all inline or pure (`ExceptionWithBacktraceBase`)
+- a template instantiation (`ExceptionWithBacktrace<std::invalid_argument>`)
+
+Both get **`weak external`** vtables emitted into *every* TU that needs them, and the
+linker coalesces. `util/time.cpp` defines six such symbols and is one of **five**
+objects in `librealm.a` doing so. Removing it orphans nothing; Rust would synthesize
+nothing. Step 2 would have parked it for a reason that does not exist.
+
+**The measurement that actually decides it is the definer count, not the attribute:**
+
+```
+nm -m librealm.a | grep " <mangled-ZT-symbol>$" | grep -vc undefined
+```
+
+| Definers | Meaning | Step 2 |
+|---|---|---|
+| 1 | sole source; removing the TU orphans the vtable | park — the shim must synthesize it |
+| >1 | coalesced weak vtable, other TUs supply it | **not a park** |
+
+`non-external` (anonymous-namespace) symbols are definer-count 1 by construction, so the
+existing local-vs-external distinction is a special case of this one and can be dropped
+in favour of it.
+
+Proposed for reflection #5 as a step-2 amendment.
+
+### Re-checking the two units already parked on step 2 — both stand
+
+| Unit | ZT\* linkage | definers | verdict |
+|---|---|---|---|
+| `util/basic_system_errors` | 3 × `non-external` | 1 | stands |
+| `util/compression` | 3 × `non-external` + 4 × `weak external` | **1** each | stands |
+
+`util/compression` is the sole definer of all four externally-visible vtables/typeinfos
+despite the `weak` attribute, so its park file's "key-function TU" wording is loose and
+its conclusion is right. Audit note appended there rather than rewriting it.
+
+So the amendment costs nothing retroactively — but it is the **seventh** consecutive
+screening lesson of the same shape, and the first where I caught it *before* writing a
+wrong park rather than after. Reflection #4 promoted "take a second measurement of a
+different kind" to the opening claim of that section; this is the first tick where doing
+so changed an outcome prospectively.
+
+### Loop state
+
+Two consecutive parks (`util/compression`, `util/time`), following two landed units.
+Stop condition is three. `status` (#17) screens clean — 7/7 symbols linked, zero `ZT*`,
+zero `throw`/`catch`/`try` — and is the next unit.
