@@ -956,3 +956,54 @@ corrected a claim I was about to make — that the clean units were exhausted. T
 not; there are three. The earlier depth-0 sampling error (see the `sha_crypto` entry)
 was the same mistake: measuring the reachable head of a list and generalising to the
 list. Screen the whole population; it is cheap.
+
+---
+
+## 2026-08-09 — `column_binary.cpp` parked; a low `nm -u` count can mean the opposite of what it looks like
+
+46 lines, one live function, **four** undefined symbols — the shortest undefined list of
+any candidate — no vtable, no `throw`, no STL return. It passes every step of the
+screening rule and it is not portable in isolation.
+
+`BinaryColumn::get_at` calls `m_root->bptree_access(ndx, func)`, a C++ function template
+instantiated on a lambda type, and `m_leaf_cache.get_at(...)`, an inline member of
+`ArrayBigBlobs`. Rust cannot instantiate a C++ template or hand a closure to one.
+Porting the function means porting B+-tree leaf traversal and blob leaf access first.
+
+### The metric has two opposite readings
+
+The screen treats a short `nm -u` list as "few dependencies, likely self-contained". The
+list is short here for the opposite reason: **everything it calls was inlined into it**.
+The dependencies did not go away, they stopped being the linker's problem, so they never
+appear in `nm -u`.
+
+| `nm -u` | meaning | portable? |
+|---|---|---|
+| short | genuinely self-contained (`interprocess_mutex`: 4 libdispatch calls) | yes |
+| short | everything inlined from templates and header members | **no** |
+| long | calls out-of-line library code (`utilities`, `fifo_helper`) | usually yes |
+
+Disambiguate from the **source**, not the object: does the body call templates, lambdas
+passed to templates, or inline members of other realm classes? If so, a short undefined
+list is evidence of inlining, not independence.
+
+`nm -u`'s other use — choosing the differential shape — is unaffected, because that is
+about what the driver must link. It is the portability reading that needs the source
+check beside it. Left in the journal rather than promoted to the rule: this is the first
+occurrence, and the rules file should not grow on single observations.
+
+### Consequence for the "3 clean units" measurement
+
+Yesterday's whole-population screen found 3 clean units out of 97. One of the three is
+this one, and it is not clean. The other two need the same source check before being
+believed:
+
+- `array_key.cpp` — live symbols are two `ArrayKeyBase<N>::verify()` instantiations,
+  near-empty in release. Near-worthless to port even if portable.
+- `array_unsigned.cpp` — still the interesting one, and now the only candidate that
+  could be both portable and byte-visible. Whether it is genuinely self-contained or
+  merely inlines `Array`'s header machinery is unresolved, and that answer decides it.
+
+The honest restatement of that measurement: **78 of 97 are behind the vtable shim, and
+the handful that are not still have to be read before they can be called portable.** A
+mechanical screen narrows the field; it does not finish the job.
