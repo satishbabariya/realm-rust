@@ -2850,3 +2850,72 @@ and better than either of those.
 One park, following a landed unit. Consecutive parks: 1. Three units remain from the
 group skipped last iteration and still owed park files: `array_with_find` #22,
 `util/resource_limits` #23, `uuid` #24.
+
+---
+
+## 2026-08-09 — `array_with_find.cpp` parked; `nm -g` inflates a unit the way `nm -u` deflates one
+
+Queue #22. ~15 minutes. Details in `migration/blocked/array_with_find.md`.
+
+### "92 symbols" was the wrong number — the obligation is four
+
+The screen reports 92 exported realm symbols for an 83-line source file, instantiated
+from a 987-line header: 28 `find_optimized`, 15 `find_sse` (SSE intrinsics), 10
+`compare_relation`, 10 `compare_equality`, and so on. That reads as one of the largest
+units in the queue.
+
+**88 of the 92 are `weak external` and coalesced.** `find_optimized<Less, 16>` has **3
+definers** in `librealm.a`. Removing this TU removes none of them from the binary and
+obliges Rust to supply none of them. Splitting `nm -m` by linkage leaves four strong
+symbols:
+
+```
+first_set_bit(uint32_t)          de Bruijn table + an explicit INT_MIN guard for v & -v
+first_set_bit64(int64_t)         two calls to the above
+find(int cond, ...)              six-way dispatch to weak find<Cond>, all bindable
+find_all(IntegerColumn*, ...)    the only hard one
+```
+
+**This is the exact mirror of the `nm -u` lesson already in `unit-screening.md`.** That
+rule says a short undefined list can mean "everything was inlined", i.e. `nm -u` makes a
+unit look *less* dependent than it is. This is the same error in the other direction:
+`nm -g` makes a unit look *bigger* than it is, because template instantiation attributes
+symbols to whichever TU happened to instantiate them. Both are fixed the same way — ask
+about **linkage**, not about counts. Proposed for reflection #6 as a step-4 amendment,
+since step 4 currently says "work from `nm -g`, never from the class declaration" without
+saying to split it by linkage.
+
+### The blocker is one vtable, and nothing outside the unit wants it
+
+`find_all` constructs `QueryStateFindAll state(*result)` and hands `&state` to the search
+templates, which call `QueryStateBase`'s pure virtuals on it. That class's vtable,
+typeinfo and typeinfo-name are `weak external` with **definer count 1**, and **no other
+object references them**.
+
+A sub-case of definer-count-1 worth naming, because "nobody else needs it" invites the
+conclusion that it can be dropped:
+
+| definer count 1, and… | why synthesis is still required |
+|---|---|
+| referenced by other TUs (`util/compression`) | they fail to link without it |
+| referenced only internally (**this unit**) | the unit itself constructs the object |
+
+### This is the vtable shim's best first customer
+
+| unit | strong symbols | vtables to synthesize | also needs |
+|---|---|---|---|
+| `util/basic_system_errors` | 2 | 1, over a **libc++** base | `std::string` by value, `__cxa_guard` static |
+| `util/compression` | ~20 | 7, four public ABI | exception shim; payload dead |
+| `impl/output_stream` | 3 | 1 | exception shim, `std::ostream::write` |
+| **`array_with_find`** | **4, three trivial** | **1, entirely unit-private** | **nothing** |
+
+No exceptions, no STL by value, live payload, and a vtable whose only consumer is inside
+the unit. Whoever builds the shim should prove it here, where nothing else can confound
+the result.
+
+### Loop state
+
+Two consecutive parks (`impl/output_stream`, this). Stop condition is three.
+`util/resource_limits` #23 (unreachable) and `uuid` #24 (throws) are next and both
+pre-screen as parks — so the third will fire next tick unless the queue is reordered.
+Flagging it now rather than being surprised by it.
