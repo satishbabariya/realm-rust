@@ -24,3 +24,4 @@ util/interprocess_mutex.cpp
 array_unsigned.cpp
 error_codes.cpp
 status.cpp
+object_id.cpp

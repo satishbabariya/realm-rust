@@ -2699,3 +2699,100 @@ which screen fully clean. That is now four units (`util/compression` #14, `versi
 `util/demangle` #18, `util/resource_limits` #23) where `gen_queue.py`'s size-and-depth
 ranking pointed the loop at dead or unportable code ahead of live clean units.
 Reflection #5 sharpened this as proposal #1; this entry is its fourth data point.
+
+---
+
+## 2026-08-09 — `object_id.cpp` ported. Byte-visible, and two byte orders in one struct.
+
+`make verify` exits 0 at `rust units ported = 10`.
+`migration/checks/run_object_id_differential.sh` exits 0 on 264 probe lines. ~50 minutes.
+
+Reached by skipping queue #21–#24, which all pre-classify as parks (`impl/output_stream`
+and `array_with_find` on step-2 definer-count 1, `util/resource_limits` unreachable,
+`uuid` on step 5). Stated plainly because it is a deviation from loop order: four
+consecutive park files would have been the alternative, and the loop's own rule warns
+that filling the directory is the failure mode. **Those four still need their park files
+written.**
+
+### The format decisions, which are the point of this unit
+
+`ObjectId` is 12 bytes on disk, guarded upstream by
+`static_assert(sizeof(ObjectId) == 12, "changing the size of an ObjectId is a file
+format breaking change")`. It stores **two byte orders in one struct**:
+
+| bytes | field | order | why |
+|---|---|---|---|
+| 0..4 | seconds | **big-endian** | so `memcmp` orders ids by time |
+| 4..7 | machine_id | little-endian | `memcpy(&machine_id, 3)` — the *low* 3 bytes of a native `int` |
+| 7..9 | process_id | little-endian | `memcpy(&process_id, 2)` — low 2 bytes |
+| 9..12 | sequence | **big-endian** | so ids made in the same second still sort by creation |
+
+The little-endian halves are not a decision anyone wrote down — they are what
+`memcpy(dst, &int_value, n)` does on a little-endian host. The same source on a
+big-endian machine would store the high-order bytes instead. Mirrored as an explicit
+truncation with the divergence commented, because "make the struct consistent" is a file
+format break and looks like a cleanup.
+
+### ABI, read off the disassembly rather than assumed
+
+Applying `status.cpp`'s lesson before writing rather than after:
+
+| function | convention | evidence |
+|---|---|---|
+| `to_bytes()` | `this` in `rdi`, 12 B in `rax:edx` | `movq (%rdi),%rax; movl 0x8(%rdi),%edx` |
+| `get_timestamp()` | `this` in `rdi`, 16 B in `rax:rdx` | `movl (%rdi),%eax; bswapl %eax; xorl %edx,%edx` |
+| `to_string()` | **`sret` in `rdi`**, `this` in `rsi` | `movq %rdi,-0x48(%rbp); movzbl (%rsi),%ecx` |
+| `gen()` | static, `ObjectId` in `rax:edx` | no `this` |
+
+`ObjectId`, `Timestamp` and `std::array<unsigned char,12>` are trivially copyable and
+return in registers; `std::string` is not and does not. The `bswapl` in `get_timestamp`
+is the compiler recognising the hand-written big-endian reconstruction.
+
+### `to_string` allocates, and the capacity is part of the answer
+
+It always produces exactly 24 characters, past libc++'s 22-byte short-string limit, so
+the result is always heap. Measured rather than derived from `__recommend`, because only
+this one length is ever produced:
+
+```
+n=22 -> short, capacity 22
+n=23 -> long,  capacity 25   (stored __cap_ 13)
+n=24 -> long,  capacity 31   (stored __cap_ 16)   <- this case
+```
+
+`capacity()` is `__cap_ * 2 - 1`, so the stored field is 16 and the allocation is 32
+bytes. Negative-controlled: setting the field to 13 fails the differential on the
+`cap=31` column.
+
+### The static initialiser, and why it is a timing difference and not a value one
+
+`object_id.cpp` carries `__GLOBAL__sub_I_object_id.cpp` — a namespace-scope `g_gen_state`
+whose constructor draws three `std::random_device` values before `main`. Rust has no
+pre-main initialisation, so the port builds the same state lazily in a `OnceLock`.
+
+That is a real difference in *when*, and none in *what*: every consumer of that state is
+random in both stacks, so no two runs of either agree. Worth being precise about the
+consequence — if a future trace ever stores a generated `ObjectId`,
+`make determinism-check` fails on the **oracle** first. That is a property of upstream,
+not of this port.
+
+It also gave the best link fingerprint yet: `__GLOBAL__sub_I_object_id` is emitted only
+by this TU, so its presence in the oracle binary (1) and absence from the hybrid (0) is a
+direct test that the C++ object was not extracted — better than `status`'s crate-probe
+proxy and better than an address-distance heuristic.
+
+### One wrong guess, caught by the linker
+
+I guessed `murmur2_or_cityhash`'s mangled name as `_ZN5realm20…` by miscounting the
+identifier length; it is 19 characters, not 20. The link failed immediately and loudly,
+which is the good case — a mangled-name guess that happens to match some *other* symbol
+would not. Take the name from `nm`, never from counting.
+
+### Assumptions
+
+- `std::isxdigit` is mirrored as ASCII. The object imports `__DefaultRuneLocale`, so the
+  C++ is locale-aware, but realm never installs a locale and no practical locale adds hex
+  digits outside ASCII.
+- `strtol(buf, nullptr, 16)` on two characters is mirrored as `hex*16 + hex`, with a
+  non-hex byte contributing 0. Reachable only when `is_valid_str` is false, which
+  `REALM_ASSERT` would have caught in a debug build and does not here.
