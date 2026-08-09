@@ -3299,3 +3299,82 @@ rather than copied — a visibility-only change to a verified module.
 Differential for `Array::blob_replace` and `ArrayBlob::get_at`, neither of which any
 trace reaches. `get_at` needs a context-flag (split) blob; `blob_replace` needs a blob
 over 16 MB or a full replace.
+
+---
+
+## 2026-08-09 — `array_blob` differential; two ways a coverage measurement lied
+
+`make verify` exits 0 at `rust units ported = 11`.
+`migration/checks/run_array_blob_differential.sh` exits 0 on 195 probe lines, and now
+fails when the split path is corrupted. Getting there took four wrong turns, and three
+of them are reusable lessons.
+
+### 1. Hand-driving `ArrayBlob` into a split state is invalid
+
+The first driver built a >16 MB blob by calling `ArrayBlob::add` in a loop. It
+segfaulted — **in the pure C++ build**, which is how it was diagnosed as mis-use rather
+than a port bug. Once the root's context flag is set, `m_size` counts refs, not bytes, so
+`ArrayBlob::add` and `destroy_deep` are both the wrong receivers. Removing `destroy_deep`
+moved the failure to a `SIGABRT` inside realm's own asserts.
+
+Those are states realm never creates. The split is produced by `ArrayBigBlobs`, and
+driving it through that caller works first time. **Rule of thumb: a differential should
+drive the unit through its real caller, not through the widest API the headers expose.**
+
+### 2. Coverage of *internal* calls must be measured on the C++ build
+
+Breakpoints on `driver_rust` reported `Array::blob_replace` hit **0** times, while the
+blob demonstrably split. The breakpoint was resolved, so it was not a matching problem.
+
+The cause: in the Rust build, `ArrayBlob::replace` calls the private
+`blob_replace_impl` **directly**. The exported `Array::blob_replace` symbol is only an
+entry point for external callers, so an internal call no longer passes through it.
+Measured on `driver_cxx`, where every call goes through a real symbol, the same driver
+shows `blob_replace` 4, `get_at` 24, `replace` 25.
+
+Generalises to the technique itself: **measure coverage on the oracle build. On a ported
+binary, a zero hit count can mean "inlined into its caller" rather than "not reached."**
+The earlier `array_blob` coverage table in this journal was taken on the *hybrid* — it
+happened to be right because those functions are only ever reached externally, but the
+method was luck rather than design.
+
+### 3. The differential was blind, and only a negative control showed it
+
+First complete version: **195→54 probe lines, all agreeing, and it caught neither
+injected bug.**
+
+Bug A — `get_at`'s `sz = current_size - offset` changed to `sz = current_size` — slipped
+through because `walk_big` always starts at `pos = 0` and then follows `pos_out`. Every
+entry into a child therefore has `offset == 0`, where the two expressions are *equal*.
+The walk shape guaranteed the blind spot. Fixed by adding `probe_inside`, which calls
+`get_at` at offsets landing mid-child; the control now fails (by segfault — reading past
+the child end — which is a failure, though a diff would have been tidier).
+
+This is the third instance of the same lesson, after `base64` (capacity) and `status`
+(refcount leak): **a differential can only see what it prints, and only for the states it
+actually enters.** The first two were about what is printed; this one is about which
+states are reached. Both halves want stating in `evidence-and-linkage.md`.
+
+### 4. A negative control that *cannot* bite is evidence, not a gap
+
+Bug B — `blob_replace`'s `data_size -= space_left` changed to `-= size_to_copy` — also
+did not fail, and that one is correct. `size_to_copy = min(space_left, data_size)`, so
+the two differ only when `data_size < space_left`, and the branch is reached only from
+`ArrayBlob::replace`'s `new_size > max_binary_size` test, which guarantees the opposite.
+
+So the underflow noted in the port entry is **unreachable through any caller**, and the
+failed control is the proof. Recorded as such rather than as a coverage hole — a control
+that cannot fail because the states are unreachable is a different thing from one that
+cannot fail because the driver is weak, and conflating them would hide the second.
+
+### Coverage now
+
+| function | traces | differential |
+|---|---|---|
+| `ArrayBlob::replace` | 110 calls over 5 traces | 25 |
+| `ArrayBlob::get_at` | 0 | 24, including mid-child offsets |
+| `Array::blob_replace` | 0 | 4 |
+| `ArrayBlob::verify` | 0 | 0 — body is `#ifdef REALM_DEBUG`, empty here |
+
+All four exported symbols are now exercised by one check or the other, except `verify`,
+which has nothing to exercise.
