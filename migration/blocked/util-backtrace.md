@@ -93,3 +93,27 @@ A better answer for this unit specifically may be that it should not be ported a
 `Backtrace` exists to decorate exception messages; it produces no `.realm` bytes, and
 `evidence-and-linkage.md` classifies it as reachable-but-byte-invisible. The cost is high
 and the byte-identity benefit is zero.
+
+## Audit 2026-08-09 (reflection #4)
+
+**The park stands, and is now confirmed by a stronger test than the one that produced
+it.** Disassembling the object and asking which function owns each EH site:
+
+```
+llvm-objdump -d -r $OBJ | awk '/^[0-9a-f]+ </{fn=$0} /___cxa_(throw|begin_catch|allocate_exception)/{print fn}' | sort -u
+```
+
+For this unit one of the owners is
+`realm::util::detail::ExceptionWithBacktraceBase::materialize_message` — a realm
+function. That is real EH and it is exactly the blocker described above.
+
+**But the second half of the amendment this entry proposed is false, and was not
+promoted.** It said: *"`__cxa_allocate_exception`/`__cxa_throw` are never
+landing-pad-only"*. Measured across the near queue, `error_codes` (#13),
+`util/to_string` (#27) and `util/terminate` (#34) all import both symbols with zero
+`throw` and zero `catch` in their sources, and in all three every EH site is owned by an
+inlined libc++ weak helper (`std::__throw_length_error`,
+`std::__put_character_sequence`, `__throw_bad_array_new_length`) or by
+`___clang_call_terminate`. That rule would have parked three clean units. The
+owning-function test replaces it in `.claude/rules/unit-screening.md` step 5; the source
+grep half of the amendment (`throw|catch|try`) was correct and was promoted.

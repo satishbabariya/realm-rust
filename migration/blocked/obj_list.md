@@ -91,3 +91,25 @@ build it here.
 The screening lesson from this entry has been promoted out of the journal into
 `.claude/rules/unit-screening.md`, which now carries the full ordered screen (the
 vtable check is step 2, before the source is read).
+
+## Audit 2026-08-09 (reflection #4)
+
+Still blocked. Two corrections to what this entry says about the group around it, both
+measured this window:
+
+1. **`error_codes` (#13) is not in the vtable/RTTI group.** With the corrected step-2
+   test (`nm $OBJ | grep -v ' U ' | grep -E '__ZT[VIS]'` — defined, local or external)
+   it emits **no** `ZT*` at all; 16 mangled symbols, all 16 in the linked oracle. The
+   earlier count used `nm -g | grep __ZT`, which reports references and misses
+   anonymous-namespace definitions. The group is **three**: this unit,
+   `util/misc_ext_errors` (unreachable), `util/basic_system_errors` (#8).
+2. **The shim this entry waits on is smaller than it was described.** `array_unsigned`
+   landed on 2026-08-09 and needed no vtable shim: *calling into* an existing vtable is
+   ~10 lines given a measured slot index (Itanium pmf encoding — `memcpy` the pointer
+   into two `long`s; the odd first word is `1 + byte offset`). What is still missing is
+   only **synthesis** — emitting `_ZTV`/`_ZTI`/`_ZTS` from Rust. That is what this unit
+   needs and it remains real, but "every array unit is behind this shim" was wrong, and
+   the separate "ref-translation shim" that was recommended twice turned out to be
+   mostly provided by the linker already.
+
+Still the cheapest first customer for vtable synthesis, for the reasons above.

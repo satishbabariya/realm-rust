@@ -19,9 +19,14 @@ Do this first, before opening the source. It costs one command and it has reorde
 queue twice.
 
 ```
-nm -g build/oracle/CMakeFiles/Storage.dir/<unit>.cpp.o | grep -v ' U '   # defined
-nm build/oracle/trace_runner                                             # linked
+OBJ=build/oracle/realm-core/src/realm/CMakeFiles/Storage.dir/<unit>.cpp.o
+nm -g $OBJ | grep -v ' U ' | awk '{print $NF}' | grep '^__Z' | sort -u  # defined
+nm build/oracle/trace_runner | awk '{print $NF}' | sort -u              # linked
 ```
+
+Intersect with `comm -12`. (The object path had `realm-core/src/realm/` missing until
+2026-08-09; realm-core is an `add_subdirectory`, so the objects are three levels below
+`build/oracle/`.)
 
 Intersect them. Four categories, and they need different evidence:
 
@@ -30,7 +35,7 @@ Intersect them. Four categories, and they need different evidence:
 | **Unreachable** | 0 symbols survive into the linked binary | `util/misc_ext_errors`, `util/random`, 5 more | nothing — it passes for an empty file |
 | **Reachable, byte-invisible** | symbols linked, but output never reaches a `.realm` | `disable_sync_to_disk`, `util/base64` | the link is intact, nothing more |
 | **Byte-visible, untraced** | could write file bytes, but no trace exercises that path | `string_data` (no trace builds a string index) | only that nothing else regressed |
-| **Byte-visible and traced** | a wrong byte fails a trace | none yet | this is the real gate |
+| **Byte-visible and traced** | a wrong byte fails a trace | `array_unsigned` — the first, 2026-08-09 | this is the real gate, and it is **shallower than it looks**; see below |
 
 Rules that follow:
 
@@ -50,6 +55,33 @@ Rules that follow:
   "always write a differential" advice does not scale down. A 208-line harness
   comparing a bool getter against a bool getter is ceremony, not evidence
   (`disable_sync_to_disk`). Say in the journal that you skipped it and why.
+
+## Linkage is not coverage — measure which traces actually call the unit
+
+The table above classifies a unit by whether its symbols survive to the link. That is a
+**necessary** condition for the gate to see it and not a sufficient one, and the gap was
+measured for the first time on `array_unsigned`:
+
+| Injected bug in the landed Rust | `make diff-test` | the unit's differential |
+|---|---|---|
+| `bit_width`: `value < 0x10000` → `<= 0x10000` (differs only at 65536) | **passes, exit 0** | fails, 22 lines |
+| `bit_width`: small values return 16 instead of 8 (differs everywhere) | fails (`erase_churn`, `many_commits`) | fails |
+
+So the gate does judge a byte-visible unit — the broad bug is caught — but the traces
+only ever drive `ArrayUnsigned` through its 8-bit path. A width bug that first bites at
+the 16-, 32- or 64-bit boundary is invisible to `make verify`. That is not a contrived
+bug class; it is the one `format-fidelity.md` opens with.
+
+**After a port lands and before writing down what the gate proved, instrument it.** One
+`AtomicUsize` per exported symbol, printed on the 0→1 transition, then `make hybrid` and
+run each trace. Five minutes, and it converts "the linker kept these symbols" into
+"these traces call these functions". For `array_unsigned` it reported 6 of 10 functions
+and 2 of 5 traces, with `set`, `truncate` and `upper_bound` reached by nothing — which
+is what the differential has to cover.
+
+Corollary, because it nearly went the other way: **do not infer coverage from a trace's
+name.** `width_boundaries.trace` does not reach `ArrayUnsigned` at all. It exercises
+width packing in `Array`.
 
 ## Prove the Rust actually replaced the C++
 

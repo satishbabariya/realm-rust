@@ -523,6 +523,39 @@ None of these was acted on. All are outside what `/reflect` may change.
    defines its health, and hard rule 2 covers the spirit of this even though the
    Makefile is not `harness/`.
 
+   **Sharpened 2026-08-09 (reflection #4), same recommendation.** The metric is a
+   line-grep, so **2 of the current 41 boundary points are comments** —
+   `disable_sync_to_disk.rs:57` and `lib.rs:14` both contain the string `extern "C"` in
+   prose. Full decomposition of the 41: 2 comments, 4 `extern "C" {` import-block
+   openers, 2 `extern "C" fn` type aliases for vtable slots, 33 exported functions.
+   Rewording a doc comment moves the project's convergence metric.
+
+4. **The convergence stop condition can be defeated by a vacuous reading.**
+   `.claude/loop.md` stops the loop when "the boundary count in `make shim-report` rises
+   for two reflections running". The count only moves when a unit lands, so a window in
+   which nothing lands reads as *flat* — indistinguishable from convergence. That has
+   now happened: reflection #3 reported flat with zero units landed, which reset the
+   two-in-a-row counter that reflection #2's rise had started. Measured against units
+   landed, boundary points per unit has risen in **every** window where anything landed:
+   4.0 (3 units) → 5.5 (6) → 5.86 (7). Suggested refinement: evaluate the condition only
+   over windows in which at least one unit landed, and report windows with zero landings
+   as "not measured" rather than as a value. Reflection #3 flagged this prospectively;
+   this is the confirmation. Not acted on — `.claude/loop.md` defines when the loop
+   stops.
+
+5. **`width_boundaries.trace` does not reach `ArrayUnsigned`, and no trace does at any
+   width above 8 bits.** This is proposal #2's coverage gap, now with a measurement
+   rather than an inference. Instrumenting all ten exported symbols of the first
+   byte-visible unit ever ported: `set`, `truncate` and `upper_bound` are called by no
+   trace at all, and only `erase_churn` and `many_commits` reach the unit. Injecting a
+   `bit_width` off-by-one that differs only at `value == 65536` leaves `make diff-test`
+   **green**; only the hand-written differential catches it. The gate is real — a broad
+   version of the same bug does fail two traces — but for the class of bug
+   `format-fidelity.md` opens with, the differential is doing the work and `make verify`
+   is a regression check. The request is again for the gate to see *more*: a trace that
+   drives an unsigned array through 16-, 32- and 64-bit element widths. I have not
+   touched `harness/traces/`.
+
 ---
 
 ## 2026-08-09 — `util/sha_crypto.cpp` ported; the depth-0 deadness was not representative
@@ -1758,3 +1791,268 @@ gate proved.
 - `panic = "abort"` means a `std::bad_alloc` from `create_node`/`Node::alloc` aborts
   rather than propagating to the C++ caller. Same divergence `base64` documented,
   allocation-failure path only.
+
+---
+
+## 2026-08-09 — reflection #4 (the first unit the gate has judged; and a proposed rule refuted before it was written)
+
+Covers `f1749ed` through `40de0a6`, six iterations.
+
+**Units attempted: 3. Landed: 1. Parked: 2, plus one park reversed.**
+
+| Iteration | Unit | Outcome |
+|---|---|---|
+| `f1749ed` | `array_unsigned.cpp` | parked — inline base helpers reach two virtuals and `translate_critical` |
+| `e08747c` | `util/basic_system_errors.cpp` #8 | parked — defines three `ZT*` from an anonymous-namespace `error_category` |
+| `d5125e7` | `util/backtrace.cpp` #10 | parked — `materialize_message` is `noexcept` around a `catch (...)`. **Loop stop condition fired**, recurring job cancelled |
+| `8ce4982` | `array_unsigned.cpp` | **un-parked** — the load-bearing blocker was a misread symbol attribute |
+| `5de9330` | `array_unsigned.cpp` | **landed** |
+| `40de0a6` | `array_unsigned.cpp` | differential added; the "first unit the gate can judge" claim measured and corrected downward |
+
+**What `make verify` actually reported: exit 0 at `rust units ported = 7`**, recorded at
+`5de9330` and unchanged at `40de0a6`; `crates/realm-core-rs/ported_units.txt` lists seven
+units. Determinism, diff-test, format-compat and fault-check all pass.
+`migration/checks/run_array_unsigned_differential.sh` exits 0 on 311 probe lines. This is
+the first `verify` in three reflection windows — reflection #3 inherited its numbers.
+**I did not re-run it during this reflection**; the above is the result recorded by the
+landing iteration, not a fresh measurement.
+
+### Convergence
+
+| | #1 | #2 | #3 | #4 (today) |
+|---|---|---|---|---|
+| C++ TUs in `upstream/src/realm` | 230 | 230 | 230 | 230 |
+| Rust source files | 5 | 8 | 8 | 9 |
+| shim / extern-C boundary points | 12 | 33 | 33 | **41** |
+| units ported | 3 | 6 | 6 | **7** |
+| **boundary points per ported unit** | **4.0** | **5.5** | 5.5 *(vacuous)* | **5.86** |
+| `TODO(shim)` + `unimplemented!` | 0 | 0 | 0 | **0** |
+
+Reflection #3 asked #4 to read the count against units landed and to skip the check as
+vacuous if none had. One landed, so the check is live. Reading it the way #2 specified —
+per-unit rise **together with** the incomplete-shim row:
+
+- Per-unit rose 5.5 → 5.86. The literal stop condition ("rises for two reflections
+  running") has **not** fired, but only because #3's reading was flat-for-lack-of-data.
+  Against landed units the sequence is 4.0 → 5.5 → 5.86: it has risen every time
+  anything landed. Journalled as proposal #4 rather than acted on.
+- `TODO(shim)` and `unimplemented!` remain **0**. No unit straddles the boundary; every
+  entry in `ported_units.txt` is served completely from Rust. By #2's own test that
+  makes this the ABI-tax reading, not the spreading reading.
+
+Decomposition of the 41, because the raw number is a line-grep and three of its four
+categories are not shims: **2 are comments** containing the string `extern "C"`, 4 are
+import-block openers, 2 are `extern "C" fn` type aliases for vtable slots, 33 are
+exported functions. (`array_unsigned` alone exports 10, for a class with 10 methods —
+no C1/C2 inflation here, unlike `interprocess_mutex`'s 7-for-3.)
+
+**A genuinely new species this window, and the one worth tracking.** Every previous
+import block declared libc or system routines — `timegm`, `dispatch_semaphore_*`,
+CommonCrypto — things the C++ called too. `array_unsigned` is the first ported unit that
+imports **realm's own C++ by mangled name**: `Node::create_node`, `Node::do_copy_on_write`,
+`Node::alloc`, `Allocator::translate_critical`, `util::terminate`, plus two virtuals
+reached through measured vtable slots. Seven runtime dependencies on `librealm.a` from
+inside the Rust crate. That is not spreading in the "half-ported unit" sense the stop
+condition is about, and it is unavoidable for any array unit before `Node` and `Allocator`
+are ported — but it is the number that must eventually go to zero for a standalone Rust
+crate, and no metric currently tracks it. Reflection #5 should count
+`grep -c 'link_name = "_ZN5realm'` (today: **5**) alongside the boundary count.
+
+### The finding that mattered most: the gate finally judged a unit, and it is shallow
+
+`array_unsigned` is the first entry in `evidence-and-linkage.md`'s fourth category,
+"byte-visible and traced", which had read *none yet* since the file was written. The
+landing iteration then measured what that is worth by injecting bugs into the landed
+Rust:
+
+| Injected bug | `make diff-test` | differential |
+|---|---|---|
+| `bit_width`: `< 0x10000` → `<= 0x10000` (differs only at 65536) | **passes, exit 0** | fails, 22 lines |
+| `bit_width`: small values return 16 not 8 (differs everywhere) | fails (`erase_churn`, `many_commits`) | fails |
+
+And the coverage instrumentation — one `AtomicUsize` per exported symbol, print on the
+0→1 transition, `make hybrid`, run each trace — reported **6 of 10 functions, 2 of 5
+traces**, with `set`, `truncate` and `upper_bound` reached by nothing, and
+`width_boundaries.trace` reaching this unit *not at all* despite its name.
+
+Two occurrences now (`string_data` was byte-visible-and-untraced; this is
+byte-visible-and-partly-traced), and the second came with a falsifiable measurement, so
+it is promoted: `evidence-and-linkage.md` gains **"Linkage is not coverage"** — the
+injected-bug table, the counter technique as a post-port step, and the
+don't-infer-coverage-from-a-trace-name corollary. The category table's "none yet" is
+replaced. Also journalled as proposal #5, because making the traces deeper is the
+human's call and `harness/traces/` is not mine to touch.
+
+### The pattern, sixth occurrence: a symbol-table read is never sufficient to park a unit
+
+Reflection #3 tabulated three iterations that had each over-read one `nm` step. This
+window added three more, one per park:
+
+| Iteration | Read | Wrong conclusion | What settled it |
+|---|---|---|---|
+| `f1749ed` | `nm` on the linked binary shows `translate_critical` as `t` | "local, so Rust cannot bind to it" | **linked two three-line probes.** `weak private external` is `N_PEXT`: external *during* linking, made local *in the image*. The `t` is caused by the attribute, not evidence against it |
+| `e08747c` | `nm -g $OBJ \| grep __ZT` is empty | "emits no vtable" | drop `-g`, filter `U`. Anonymous-namespace classes emit `ZT*` as `non-external`; this unit defines three |
+| `d5125e7` | `grep -c throw` = 0 | "no exceptions, candidate" | `catch` is the other half, and it is the harder half |
+
+Six iterations, six different steps, same shape. Each time the fix looked like "add a row
+to the table" and the next iteration found a new row. So the promotion this time is not a
+row — it is the escalation itself, moved to the **opening claim** of
+`unit-screening.md`'s "What each step does not tell you" (as the `basic_system_errors`
+entry proposed): *when a screen step is about to decide port-or-park, take a second
+measurement of a different kind — one that does not read a symbol table.* Each of the six
+second measurements cost under ten minutes; two reversed the verdict, and one of those
+had already shipped a wrong park file and a wrong recommendation to the user twice.
+
+Also promoted, all with the units that confirmed them:
+
+- Step 2's command → `nm $OBJ | grep -v ' U ' | grep -E '__ZT[VIS]'`, with the table of
+  how both simpler forms fail in opposite directions.
+- Step 5 → `grep -cE '\b(throw|catch|try)\b'`, plus the owning-function test below.
+- A new **step 8** for class-shaped units: expand the inline methods the unit calls on
+  its own bases and see what they bottom out in, with the four-way cost table
+  (arithmetic → reimplement; out-of-line symbol → one `#[link_name]`; virtual → one
+  measured slot; lambda-driven template → park) and the `N_PEXT` warning. Two iterations
+  screened `array_unsigned` clean without it.
+
+### A proposed rule, refuted before it was written down
+
+The `util/backtrace` park queued this amendment for promotion:
+*"`__cxa_allocate_exception`/`__cxa_throw` are never landing-pad-only ⇒ real EH, park."*
+
+Checked before promoting it, against the six units the corrected screen calls candidates.
+It is **false, and would have parked three clean ones.** `error_codes` (#13),
+`util/to_string` (#27) and `util/terminate` (#34) all import
+`___cxa_allocate_exception` + `___cxa_throw` + `___cxa_free_exception` while their
+sources contain zero `throw` and zero `catch`. Disassembling and asking *which function
+owns the site*:
+
+```
+llvm-objdump -d -r $OBJ | awk '/^[0-9a-f]+ </{fn=$0} /___cxa_(throw|begin_catch|allocate_exception)/{print fn}' | sort -u
+```
+
+| unit | owners of every EH site |
+|---|---|
+| `error_codes` | `std::__throw_length_error`, `std::__put_character_sequence`, `__throw_bad_array_new_length`, `___clang_call_terminate` |
+| `util/to_string` | `std::__throw_length_error`, `std::__put_character_sequence`, `___clang_call_terminate` |
+| `util/terminate` | same three |
+| `status` | `std::__put_character_sequence`, `___clang_call_terminate` |
+| `util/backtrace` | **`realm::util::detail::ExceptionWithBacktraceBase::materialize_message`** — and the three libc++ helpers |
+
+The throw machinery in the first four arrived inlined with a `std::string`/`std::vector`
+instantiation; its only trigger is a length or allocation failure, which is the divergence
+`panic = "abort"` has documented since `base64`. The discriminator that separates all five
+cases in both directions is **does a `realm::` function own an EH site**, and that is what
+step 5 now says. The source-grep half of the amendment was correct and was promoted; the
+symbol half is recorded in `migration/blocked/util-backtrace.md` as refuted, so the next
+reader does not re-derive it.
+
+This is the first time an amendment queued by a previous iteration has been checked before
+promotion rather than after. It cost about ten minutes and saved three units.
+
+### The corrected screen over the near queue
+
+Object path — **also corrected in both rules files this window, having been wrong since
+they were written**: the objects are at
+`build/oracle/realm-core/src/realm/CMakeFiles/Storage.dir/`, not
+`build/oracle/CMakeFiles/Storage.dir/` (realm-core is an `add_subdirectory`). Every
+screen command in both files silently failed with "no such file".
+
+| unit | DEF | LNK | defines `ZT*` | `throw` | `try`/`catch` | EH owner |
+|---|---|---|---|---|---|---|
+| `object_id` #25 | 12 | 12 | 0 | 0 | 0 | **none — no `__cxa_*` at all** |
+| `status` #17 | 7 | 7 | 0 | 0 | 0 | libc++ only |
+| `error_codes` #13 | 16 | 16 | 0 | 0 | 0 | libc++ only |
+| `util/to_string` #27 | 18 | 18 | 0 | 0 | 0 | libc++ only |
+| `util/terminate` #34 | 11 | 11 | 0 | 0 | 0 | libc++ only |
+| `version` #19 | 14 | 8 | 0 | 0 | 0 | libc++ only — partial linkage |
+| `table_ref` #20 | 10 | 10 | 0 | **3** | 0 | park at step 5 |
+| `util/time` #16 | 15 | 15 | **6** | 4 | 0 | park at step 2 |
+
+`error_codes` #13 has been named a member of the vtable/RTTI group since reflection #2.
+**It is not, and never was** — the count came from `nm -g | grep __ZT`, which reports
+references and misses local definitions. Corrected in `unit-screening.md`, `obj_list.md`
+and `util-misc_ext_errors.md`. The group is three: `util/misc_ext_errors` (unreachable),
+`util/basic_system_errors` #8, `obj_list` #15.
+
+### Blocked directory audit
+
+Eleven entries: two added this window, one deleted (`array_unsigned.md`, correctly).
+Nothing landed this window unblocks any of them, but two entries were materially wrong
+and are now annotated:
+
+- **`obj_list.md`** — `error_codes` removed from the group; and the shim it waits on is
+  **smaller than described**. `array_unsigned` landed needing no vtable shim, because
+  *calling into* an existing vtable is ~10 lines given a slot index measured off the
+  Itanium pmf encoding. Only **synthesis** (`_ZTV`/`_ZTI`/`_ZTS` emitted from Rust) is
+  still missing. Still the cheapest first customer.
+- **`util-misc_ext_errors.md`** — same group correction.
+- **`util-backtrace.md`** — park confirmed by the owning-function test; its proposed
+  symbol-based rule recorded as refuted.
+- The seven sync-unreachable entries are unchanged and still need one project-level
+  `REALM_ENABLE_SYNC` decision, which hard rule 3 puts out of scope.
+- `column_binary.md` unchanged; reflection #3's note already carries the sharper
+  criterion, which step 8 now restates as a rule.
+
+Two of eleven parks are now decided on ABI cost rather than reachability, and one park
+was reversed on re-measurement. A loop that never un-parks anything would be as
+suspicious as one that never parks.
+
+### Loop health
+
+The three-consecutive-parks condition fired at `d5125e7` and was right to. What un-stuck
+the loop was **not** reordering the queue and not building a shim — both of which the
+previous two entries recommended, twice, to the user. It was re-testing one linker claim
+with a three-line probe. The standing recommendation "build the ref-translation shim
+first" is **withdrawn**: most of what it was supposed to provide, `ld` already provides.
+
+The vtable/RTTI **synthesis** shim recommendation stands, at reduced scope and reduced
+urgency — three units, not the 78 that the whole-population screen implied, because that
+screen counted units that merely *call* virtuals.
+
+### What would most speed up the next session
+
+**Port `object_id.cpp` (#25).** It is the only unit in the near queue that is clean by
+every corrected step: 12/12 symbols linked, no `ZT*`, no `throw`, no `catch`, and not a
+single `__cxa_*` import. Known before opening it, from this window's measurements:
+
+- Three constructors appear as six symbols (C1/C2 pairs) — step 4's lesson, unchanged.
+- `to_string()` returns `std::string` by value ⇒ `sret` plus `operator new` ownership.
+  Step 6 applies; `base64` is the worked example.
+- `gen()` pulls `std::random_device` and `time`, and `murmur2_or_cityhash` is an
+  out-of-line realm import. A nondeterministic generator inside a byte-identity port is
+  worth flagging: if any trace called `gen()`, `make determinism-check` would already be
+  failing, so none does — but that also means it is untestable by the gate and belongs in
+  a differential, or out of scope.
+- `hex_digits` at `object_id.cpp:48` and the anonymous namespace at `:29` give the
+  archive-shape differential a fingerprint symbol for the "was the C++ object extracted"
+  guard.
+
+Run the coverage instrumentation after it lands, before writing down what the gate proved.
+
+**Race note.** While this reflection was being written, a porting session was already in
+flight on **`error_codes.cpp` (#13)** — `src/error_codes.rs` and
+`src/error_codes_table.rs` appeared in the working tree at 15:26–15:29, with
+`ported_units.txt` and the `realm_rs_units_ported()` probe bumped to 8. Nothing here
+touched those files. Two things follow. First, `object_id` is the recommendation *after*
+that one lands, not instead of it. Second, and worth more: `error_codes` is one of the
+three units the refuted `__cxa_throw` rule would have parked, and a session picked it up
+and got as far as a 512-line table port. Had that amendment been promoted an hour
+earlier it would have blocked a unit that is currently being ported without incident.
+That is the concrete cost of promoting a rule from a single park, and the argument for
+the two-occurrence threshold the reflect method already states.
+
+### Deliberately not written
+
+- **No row added to `port-unit/SKILL.md`'s divergence table.** The one gate failure
+  observed this window was an injected `bit_width` bug, and its diagnosis —
+  "element width chosen differently" — is already row 2. No offset-to-meaning mapping was
+  recorded that the table does not already have. The table stays at five rows.
+- **The `set_width` `wrapping_shr` hazard, the off-by-one log2 header width, the
+  `insert` `m_size`-after-`alloc` quirk, and the `int64_t`/`uint64_t` comparison in
+  `realm::lower_bound`** stay in the landing entry. All are one occurrence and all are
+  specific to `array_unsigned` or to `Array`-family units. If a second array unit hits
+  the same header-width encoding, that becomes a `format-fidelity.md` entry and not
+  before.
+- **Nothing in `harness/`, the `Makefile`, `upstream/`, `CLAUDE.md`, `.claude/loop.md`,
+  `.claude/settings.json` or `.claude/hooks/`.** Two things I would change if they were
+  mine are proposals #4 and #5 above.

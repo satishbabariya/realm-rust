@@ -139,3 +139,15 @@ destructors, so vtable layout is the only thing under test).
 
 Unparking this one still requires `REALM_ENABLE_SYNC=ON` for both stacks, which is a
 project-level decision and out of this loop's scope under hard rule 3.
+
+## Audit 2026-08-09 (reflection #4)
+
+Still blocked, and still for the same reason: unreachable with `REALM_ENABLE_SYNC=OFF`,
+which is a project-level decision outside this loop's scope.
+
+Correction to the group count above: **`error_codes.cpp` (#13) is not a member.**
+Re-measured with the defined-only step-2 test, it emits no `ZT*` and all 16 of its
+mangled symbols reach the linked oracle. The group is three — this unit,
+`util/basic_system_errors.cpp` (#8), and `obj_list.cpp` (#15) — of which only the last
+two are live. See [`obj_list.md`](obj_list.md) for what the shim still has to do now
+that `array_unsigned` has shown that *calling* a virtual needs no shim at all.
