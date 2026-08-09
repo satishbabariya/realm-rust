@@ -1472,3 +1472,97 @@ ref-translation + vtable/RTTI shim is the highest-value next piece of work, and 
 a queue unit. But with seven clean candidates ahead of it, the queue is no longer
 *blocked* on it — which was the argument for building it immediately. Landing a couple of
 those first is the cheaper order.
+
+---
+
+## 2026-08-09 — `util/backtrace.cpp` parked. Third consecutive park; loop stopped.
+
+Queue #10, the first unit neither ported nor blocked. Reachable (20/20 symbols in the
+linked oracle), defines no vtable, `grep -c throw` = 0 — it passes every step of the
+screen, and it is not portable. ~20 minutes. Details in
+`migration/blocked/util-backtrace.md`.
+
+Most of it is easy: `Backtrace` is a 24-byte `{void*, char* const*, size_t}` whose
+ctors, dtor, assignments and `capture()` are `malloc`/`free`/`strlen`/`memcpy` plus
+`::backtrace` and `::backtrace_symbols`. The blocker is
+`ExceptionWithBacktraceBase::materialize_message()`, a `noexcept` function whose body is
+wrapped in `try { … } catch (...) { return msg; }`. The catch-all is load-bearing — it is
+how the function does allocating, throwing work while promising not to throw.
+**Rust cannot catch a foreign C++ exception**, and `panic = "abort"` closes the other
+door. Reproducing it needs a C++ shim containing the try/catch, i.e. adding C++ to the
+hybrid.
+
+### Step 5 is blind here — the fifth `nm`/grep over-reading
+
+`grep -c throw` = 0 while the object imports `___cxa_allocate_exception`, `___cxa_throw`,
+`___cxa_begin_catch` and `___cxa_end_catch`. The dependency comes from `catch`, not
+`throw`. Worse, the `nm -u` symptoms that would have caught it are the ones
+`unit-screening.md` explicitly tells you to *discount*: its table says
+`__cxa_begin_catch` + `__gxx_personality_v0` mean "a `noexcept` landing pad, not a
+throw" — true for `array_unsigned`, false here.
+
+Proposed for reflection #4, both halves:
+
+- `grep -cE '\bthrow\b|\bcatch\b|\btry\b'`, not `grep -c throw`.
+- `__cxa_begin_catch` **plus a `catch` in the source** ⇒ real EH, park.
+  `__cxa_allocate_exception` / `__cxa_throw` are never landing-pad-only.
+
+That is now **three** proposed screening amendments queued for reflection #4, one per
+iteration in this window: inline base-class helpers (from `array_unsigned`), the
+defined-vs-referenced `ZT*` test (from `basic_system_errors`), and this one.
+
+### The loop's stop condition fired, and it is right
+
+Three consecutive parks: `array_unsigned` (`f1749ed`), `util/basic_system_errors`
+(`e08747c`), `util/backtrace` (this one). `.claude/loop.md`: *"Three consecutive units
+end up in `migration/blocked/`. The queue order is probably wrong and continuing just
+fills the directory."* Recurring job `53a06097` cancelled.
+
+**The sharper evidence is not the count — it is that my own corrected screen predicted
+this unit was a candidate, and it was wrong.** Last iteration I re-ran the whole screen
+with a fixed step-2 test, produced a table of seven "candidates", and recommended letting
+the loop continue on the strength of it. `util/backtrace` was top of that list. One
+iteration later it is parked on a criterion the screen does not test for at all.
+
+So the problem is not that the queue is mis-ordered. It is that **the screen does not
+model what actually gates these units**, and each iteration discovers one more thing it
+does not model. Three iterations, three new blocking criteria, none of them predicted by
+the previous iteration's screen. Reordering the queue would not have helped; the six
+remaining "candidates" (`error_codes`, `status`, `object_id`, `util/to_string`,
+`util/terminate`, `version`) carry exactly as much unmeasured risk as this one did.
+
+### What the numbers actually say about this window
+
+Six iterations since reflection #2. **Units landed: 0. Parked: 4.** Last `make verify`
+exit 0 remains `599894a`, `rust units ported = 6`, unchanged. Six units are ported, all
+from before this window; every one of them was found and landed before the screen grew
+its current shape.
+
+Three distinct blockers now have names and first customers:
+
+| Shim | Blocks | First customer |
+|---|---|---|
+| vtable/RTTI synthesis | 78 of 97 by the whole-population screen | `obj_list`, `util/basic_system_errors` |
+| ref translation (`translate`, `is_read_only`, vtable slot table) | every array unit | `array_unsigned` |
+| C++ exception boundary | unknown, unmeasured | `util/backtrace` |
+
+The first two are thin ABI layers and are worth building. The third is not thin — it
+needs real C++ in the hybrid — and `util/backtrace` may be the wrong reason to build it,
+since `Backtrace` produces no `.realm` bytes at all.
+
+### Recommendation, for a human rather than for the next tick
+
+1. **Build the ref-translation shim first.** Smallest, best-measured (all offsets and
+   slot indices are in `migration/blocked/array_unsigned.md`), and it unblocks the array
+   units — the only ones whose bytes `make diff-test` can actually judge. Every unit
+   landed so far is byte-invisible or untraced; the gate has still never failed on a real
+   port.
+2. **Then the vtable/RTTI shim**, which is the big one by unit count.
+3. **Screen for the exception boundary before either**, because it is currently
+   unmeasured across the whole population and it is the one blocker that may not be worth
+   solving. A single `grep -lE '\b(try|catch)\b'` over the 97 remaining units would say
+   how much of the queue is behind it.
+4. **Do not restart the unit-at-a-time loop until at least one shim exists.** On this
+   evidence it will keep producing well-diagnosed parks, which is a real but diminishing
+   return — the last three parks each cost an iteration and each taught one screening
+   lesson, and the lessons are now arriving faster than the units.
