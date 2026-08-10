@@ -94,6 +94,49 @@ base would pass even with the vptr left wrong.
 `error::make_error_code(basic_system_errors)`, `Printable::str`. Plus `mmap`/`munmap`/
 `msync` from libc, and `std::string` `append`/`insert` for the message building.
 
+## The source, measured
+
+`REALM_ENABLE_ENCRYPTION` is **1** in this build (`build/oracle/.../util/config.h:18`), so
+the encryption path in `mmap` is live and is the bulk of the work. The rest is small.
+
+| function | live lines | notes |
+|---|---|---|
+| `mmap` | ~55 | the hard one — encryption branch **and** POSIX branch, 2 throws |
+| `msync` | ~23 | retry loop on `EINTR`, 2 throws |
+| `munmap` | ~15 | 1 throw |
+| `mmap_fixed` | ~12 | 1 throw |
+| `reserve_mapping` | small | |
+| `round_up_to_page_size` | 4 | `(size + ps - 1) & ~(ps - 1)`, no throw |
+| `do_encryption_read_barrier` / `_write_barrier` | 3 each | straight forwarding, no throw |
+
+Types and calls `mmap` needs:
+
+```
+struct FileAttributes { FileDesc fd; File::AccessMode access; EncryptedFile* encryption; }
+    -> {i32, i32, ptr}, 16 bytes   (confirm with -fdump-record-layouts before use)
+
+EncryptedFile::add_mapping(File::SizeType, void*, size_t, File::AccessMode)
+    -> returns std::unique_ptr<EncryptedFileMapping> BY VALUE, so sret, and the caller
+       move-assigns it into the `mapping` out-parameter
+
+_impl::SimulatedFailure::trigger_mmap(size_t)          static, bindable
+util::page_size()                                      bindable
+util::format(const char*, initializer_list<Printable>) bindable
+make_basic_system_error_code(int).message()            std::error_code::message() -> sret
+```
+
+Two things in `mmap` that are not straight transcription:
+
+- **`ScopeExitFail cleanup([&]() noexcept { munmap(addr, size); });`** — a C++ template
+  driven by a lambda. This is *not* the `column_binary` park case: Rust does not have to
+  call the template, only to reproduce the behaviour, which is "if `add_mapping` throws,
+  `munmap(addr, size)` before propagating". **But Rust cannot catch the C++ exception to
+  run that cleanup**, and catching is the half no panic-mode change fixes. Either
+  `add_mapping` goes through a small C++ trampoline that keeps the guard, or the cleanup
+  path cannot be reproduced and the unit parks on it. **Settle this before writing code.**
+- `mmap` returns `static_cast<char*>(addr) - page_start + offset`, an address *inside* the
+  mapping rather than its base. Wrong there is a wild pointer, not a byte diff.
+
 ## Order of work
 
 1. Move `migration/in-progress/exceptions.rs` into the crate and generalise it from
