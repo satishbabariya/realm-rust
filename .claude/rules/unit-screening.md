@@ -100,8 +100,46 @@ It was never gated on the shim.
 **3. `nm -u $OBJ` — size of the undefined set.** This also picks the differential shape;
 see `evidence-and-linkage.md`. A short, self-contained list is a good sign in itself.
 
-**4. `nm -g $OBJ` — the full exported list.** Work from this, never from the class
-declaration in the header. The Itanium ABI emits constructors and destructors in
+**4. `nm -g $OBJ` — the full exported list, then split it by linkage.**
+
+> **Corrected 2026-08-10. `nm -g` massively overstates the obligation.** The number that
+> matters is how many symbols the object defines as **strong external** *and* is the sole
+> definer of. Everything else — `weak external` template instantiations, and
+> `weak private external` / `non-external` instantiations that every TU emits its own copy
+> of — is supplied elsewhere, so removing this TU orphans nothing and Rust need not define
+> it.
+>
+> Measured across the pending set, the gap is not marginal, it is the difference between
+> "too big to attempt" and "an afternoon":
+>
+> | unit | `nm -g` | **strong** | lines |
+> |---|---|---|---|
+> | `link_translator` | 293 | **2** | 83 |
+> | `impl/copy_replication` | 153 | **11** | 283 |
+> | `to_json` | 113 | **8** | 515 |
+> | `array_fixed_bytes` | 91 | **2** | 220 |
+> | `history` | 45 | **1** | 279 |
+> | `array_backlink` | 42 | **8** | 277 |
+> | `array_decimal128` | 20 | **7** | 324 |
+> | `node` | 16 | **8** | 170 |
+>
+> The command:
+>
+> ```
+> nm -m $OBJ | grep -v '(undefined)' | grep -E '__ZN[A-Z]*5realm' \
+>   | grep -v 'weak external' | grep -v 'non-external' | grep -v 'private external' \
+>   | grep ' external ' | awk '{print $NF}' | sort -u
+> ```
+>
+> then confirm each is sole-definer against `librealm.a`, exactly as step 2 does for `ZT*`.
+> `array_backlink` is 8 strong symbols of which all 8 are sole-definer, and its 12 weak
+> exports all have >1 definer — so the obligation is 8, not 42.
+>
+> This does **not** relax the all-or-nothing rule; it states it correctly. A TU is
+> all-or-nothing in its **strong sole-definer** symbols, because those are what force the
+> archive member to be extracted. Coalesced and per-TU-private instantiations never do.
+
+Work from the exported list, never from the class declaration in the header. The Itanium ABI emits constructors and destructors in
 variants — `C1` complete / `C2` base, `D0` deleting / `D1` complete / `D2` base — and
 the compiler emits *all* of them even when they are behaviourally identical. Defining
 only `C1`/`D1` links fine until some caller references another form.

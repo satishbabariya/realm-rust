@@ -58,7 +58,7 @@ Corollary, and the general form: **a linked libc++ helper is not evidence about 
 that happens to define it.** When linkage is partial, ask which *side* of the split the
 unit's own namespace fell on, not what fraction survived.
 
-Four categories, and they need different evidence:
+Five categories, and they need different evidence:
 
 | Category | Test | Example | What `make diff-test` proves |
 |---|---|---|---|
@@ -66,8 +66,24 @@ Four categories, and they need different evidence:
 | **Reachable, byte-invisible** | symbols linked, but output never reaches a `.realm` | `disable_sync_to_disk`, `util/base64`, `status` | the link is intact, nothing more — but see `format-compat` below |
 | **Byte-visible, untraced** | could write file bytes, but no trace exercises that path | `string_data` (no trace builds a string index) | only that nothing else regressed |
 | **Byte-visible and traced** | a wrong byte fails a trace | `array_unsigned` — the first, 2026-08-09 | this is the real gate, and it is **shallower than it looks**; see below |
+| **Reachable but empty** | symbols link, and the code was compiled out | `array_key` — 2/2 linked, **22 bytes of text for 104 lines** | nothing; the Rust and the C++ are both empty |
 
 Rules that follow:
+
+- **Reachable → still check the unit is not empty.** `linked` measures whether symbols
+  *survive*, not whether they *do anything*. `array_key.cpp` is 104 lines entirely inside
+  `#ifdef REALM_DEBUG`, links 2 of 2 symbols, has **zero** undefined symbols, and compiles
+  to 22 bytes of `retq`. It is the best-looking row in the pending set and porting it would
+  raise the ported count having substantiated nothing. Detect it with text size per source
+  line:
+
+  ```
+  otool -l <unit>.cpp.o | grep -A4 'sectname __text' | grep size
+  ```
+
+  Swept over all 52 pending units, `array_key` is 0.21 bytes/line and the next is 2.64, so
+  it is an outlier and not a class — but the sweep is what established that, and a
+  suspiciously short undefined list is the cheap early warning.
 
 - **Unreachable → park it.** Do not port it. A green `make verify` on a unit the linker
   never pulls is not weak evidence, it is no evidence, and committing it records

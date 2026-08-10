@@ -4483,3 +4483,86 @@ leverage:
 
 None of those is a "next unit" in the sense this loop has been consuming. That is the
 honest state, and it is a decision point rather than a queue position.
+
+---
+
+## The queue was measuring the wrong size — 2026-08-10
+
+No unit ported. One parked, and two measurements that reframe everything still pending.
+
+### `array_key`: reachable, and empty
+
+It is the best-looking row in the pending set — 2 of 2 realm symbols linked, **zero**
+undefined symbols of any kind, no `ZT*`, no VTT, no `throw|catch|try`, inbound 13, 104
+lines. On the queue it is unambiguously the next unit.
+
+The whole file is inside `#ifdef REALM_DEBUG`, which this build does not define. Both
+functions compile to `pushq %rbp; movq %rsp,%rbp; popq %rbp; retq` and the TU's entire
+`__text` section is **22 bytes**.
+
+The zero-undefined-symbols result is the tell in hindsight: a function that walks parent
+pointers, does two `dynamic_cast`s and calls `Table::get_opposite_table` cannot have zero
+undefined symbols unless it was compiled out. "Beautifully self-contained" and "not there"
+look identical from `nm`.
+
+That is a fifth observability category, now in `evidence-and-linkage.md`: **reachable but
+empty**. Detect it with text bytes per source line. Swept over all 52 pending units,
+`array_key` is 0.21 and the next lowest is 2.64, so it is an outlier rather than a class —
+but the sweep is what established that, instead of assuming it.
+
+Porting it would be two empty Rust functions, byte-identical by construction, a passing
+gate, and a ported-unit count one higher having substantiated nothing.
+
+### `nm -g` overstates the obligation by up to 145x
+
+The bigger finding. The queue's `linked` column, and every "N symbols" note in this
+journal, counts what `nm -g` reports. That number answers *reachability* correctly and
+answers **scope** very badly, because most of what a realm TU exports is template
+instantiations that other TUs also emit.
+
+What actually has to be defined in Rust is the **strong external** symbols this object is
+the **sole definer** of — those are what force the archive member to be extracted. Measured
+across the pending set:
+
+| unit | `nm -g` | **strong** | lines |
+|---|---|---|---|
+| `link_translator` | 293 | **2** | 83 |
+| `impl/copy_replication` | 153 | **11** | 283 |
+| `to_json` | 113 | **8** | 515 |
+| `array_fixed_bytes` | 91 | **2** | 220 |
+| `history` | 45 | **1** | 279 |
+| `array_backlink` | 42 | **8** | 277 |
+| `node` | 16 | **8** | 170 |
+
+`array_backlink` is the worked example: 8 strong exports, all 8 sole-definer, and 12 weak
+exports every one of which has more than one definer — so removing the TU orphans nothing
+and the obligation is 8, not 42. Its other 33 symbols are `weak private external`
+`BPlusTree<int64_t>` instantiations that every including TU emits for itself.
+
+**This does not relax the all-or-nothing rule, it states it correctly**: a TU is
+all-or-nothing in its *strong sole-definer* symbols. I had been reading "all-or-nothing"
+against the `nm -g` count and scoping units accordingly, which made several of them look
+untouchable. `set` reads as 270 symbols; `impl/copy_replication` as 153.
+
+### The next unit is `node.cpp`
+
+Surfaced by the reframing and it is the best candidate seen so far:
+
+- **8 strong symbols**, 170 lines, `tct = 0`, no `ZT*`, no VTT
+- and they are `Node::create_node`, `Node::alloc`, `Node::do_copy_on_write`,
+  `Node::calc_byte_len`, `Node::calc_item_count`, plus `ArrayPayload::~ArrayPayload`
+
+That list is **where element width and header layout are decided** — `format-fidelity.md`
+opens on exactly this. `array_unsigned.rs` and `array_blob.rs` already *bind*
+`Node::alloc`; porting it turns two imports into definitions.
+
+Crucially it is **byte-visible and traced**: every trace allocates nodes, so
+`make diff-test` can genuinely judge it. That would be only the second such unit after
+`array_unsigned`, and by far the most central. It is also the highest-risk place to be
+wrong, which is the correct kind of risk for this project — the gate is watching.
+
+`array_fixed_bytes` is the counter-example to check first next time: 2 strong symbols and
+both are *data* (`Sentinel<UUID>::null_value`, `Sentinel<ObjectId>::null_value`), with all
+the actual code in weak instantiations other TUs supply. Porting it would define two
+constants and change nothing — `array_key` in a different disguise, and worth noticing
+before rather than after.
