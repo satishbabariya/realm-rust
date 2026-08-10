@@ -163,6 +163,23 @@ park, unless the exception shim exists. Throwing from Rust needs `__cxa_throw` w
 correctly built exception object and matching RTTI, the same class of work as step 2.
 `uuid.cpp` (#24) was rejected here.
 
+**Corrected 2026-08-10: it is a three-way split, not two.** Measured in
+`migration/checks/throw_probe/`:
+
+| the unit needs to | portable? | how |
+|---|---|---|
+| **throw** | **yes** | `__cxa_allocate_exception` + a bound constructor + `__cxa_throw` with the bound typeinfo. `exceptions.cpp` stays C++, so nothing is synthesized. Needs `panic = "unwind"` |
+| **run cleanup while an exception passes through** (`ScopeExitFail`, RAII guards) | **yes** | a Rust `Drop`. The Itanium unwinder runs Rust cleanup landing pads for a foreign exception — verified, including that it does *not* run on the success path |
+| **catch and continue** (swallow, convert, return a value instead) | **no** | Rust has no `catch`, and no panic-mode setting changes that |
+
+Only the third is a park. `util/backtrace` is genuinely in it — `materialize_message` is
+`noexcept` around `try { … } catch (...) { return msg; }`, which *consumes* the exception.
+`global_key`'s `operator>>` likewise converts the exception into a stream failure state.
+
+Note that a source `grep` for `catch` finds neither RAII guards nor the distinction above:
+`ScopeExitFail` is a cleanup in a template's clothing and contains no `catch` token. Read
+the exception-path behaviour, do not count keywords.
+
 `catch` is the half that was missing and it is the harder half. `util/backtrace.cpp` has
 **zero** `throw` and is unportable: `materialize_message()` is `noexcept` with its body
 wrapped in `try { … } catch (...) { return msg; }`, which is load-bearing — it is how

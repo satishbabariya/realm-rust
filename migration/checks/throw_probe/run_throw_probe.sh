@@ -59,6 +59,21 @@ if [ "$rc" -ne 0 ]; then
     echo "FAIL: not every exception type round-tripped as its own type." >&2; exit 1
 fi
 
+# --- fourth: does a Rust Drop run when a C++ exception unwinds through it? ---
+# This is what makes RAII cleanup (ScopeExitFail and friends) reproducible without a
+# catch, which Rust does not have. util/file_mapper::mmap depends on it.
+rustc --edition 2021 -O --crate-type staticlib --target x86_64-apple-darwin -C panic=unwind \
+    "$HERE/drop_probe.rs" -o "$WORK/libdrop.a" 2>/dev/null
+clang++ -std=c++20 -O2 -w -I "$ROOT/upstream/src" -I "$ROOT/build/oracle/realm-core/src" \
+    "$HERE/drop_driver.cpp" "$WORK/libdrop.a" "$REALM_A" "${LIBS[@]}" -o "$WORK/drop" \
+    2>&1 | grep -v '^ld: warning' || true
+"$WORK/drop"; rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "FAIL: Rust drops do not run for a foreign unwind -- RAII cleanup is not reproducible." >&2
+    exit 1
+fi
+
 echo "PASS: Rust throws propagate under panic=unwind, abort under panic=abort,"
 echo "      a Rust panic is still fatal (SIGABRT) rather than catchable by C++,"
-echo "      and all four of util/file_mapper's exception types round-trip by exact type."
+echo "      all four of util/file_mapper's exception types round-trip by exact type,"
+echo "      and Rust drops run for a foreign unwind, so RAII cleanup is reproducible."

@@ -127,13 +127,14 @@ make_basic_system_error_code(int).message()            std::error_code::message(
 
 Two things in `mmap` that are not straight transcription:
 
-- **`ScopeExitFail cleanup([&]() noexcept { munmap(addr, size); });`** — a C++ template
-  driven by a lambda. This is *not* the `column_binary` park case: Rust does not have to
-  call the template, only to reproduce the behaviour, which is "if `add_mapping` throws,
-  `munmap(addr, size)` before propagating". **But Rust cannot catch the C++ exception to
-  run that cleanup**, and catching is the half no panic-mode change fixes. Either
-  `add_mapping` goes through a small C++ trampoline that keeps the guard, or the cleanup
-  path cannot be reproduced and the unit parks on it. **Settle this before writing code.**
+- **`ScopeExitFail cleanup([&]() noexcept { munmap(addr, size); });`** — **settled, and it
+  is reproducible.** A Rust `Drop` runs when a C++ exception unwinds through the Rust
+  frame: `migration/checks/throw_probe/drop_probe.rs` shows the cleanup running exactly
+  once on the exception path, not at all on the success path, with the exception arriving
+  in C++ intact. Two controls bite (never arming the guard; disarming before the call). So
+  no `catch` and no C++ trampoline is needed — an armed-by-default guard disarmed before
+  the normal return has exactly `ScopeExitFail`'s semantics.
+
 - `mmap` returns `static_cast<char*>(addr) - page_start + offset`, an address *inside* the
   mapping rather than its base. Wrong there is a wild pointer, not a byte diff.
 
