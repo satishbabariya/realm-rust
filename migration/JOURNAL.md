@@ -4379,3 +4379,107 @@ adding a unit should bump the count in `lib.rs` in the same edit.
 The unit is 1,848 lines and the methods half took about as long as the 919-line conversion
 half, almost all of it on the ABI and the `std::string` capacity question. Line count
 predicted nothing here, in both directions.
+
+---
+
+## Screening pass: the periphery is exhausted — 2026-08-10
+
+No unit ported. Six parked, and a screening rule found to have been dead since it was
+written.
+
+### `util/terminate` had the cleanest `nm` screen in the tree and is unportable
+
+It reached #1 by passing every cheap step: 2 of 2 realm symbols linked and both are the
+payload, zero `ZT*`, zero `throw|catch|try`, and 42 of 67 `Storage` objects reference it.
+Everything a symbol-table screen can see said port it.
+
+Two things stop it, neither visible to `nm -g`:
+
+1. **`std::stringstream ss;`** — one declaration that drags the whole libc++ iostream
+   construction path into the TU: a VTT plus three stream vtables, `ios_base::init`,
+   `locale`, `use_facet`, `ctype<char>::id`, `basic_ios::~basic_ios`, the `sentry` pair.
+   `basic_stringstream` has virtual bases and its constructor is a template instantiation
+   expanded here, not a symbol to bind.
+2. **`os_log_error` is compiler-generated metadata.** The macro emits a descriptor into
+   `__TEXT,__oslogstring` — the section is in the object — and calls `__os_log_error_impl`
+   with it. Rust cannot emit that section, and a hand-encoded descriptor would be wrong in
+   a way **no differential here could detect**, because `os_log` output never comes back
+   in-process to compare.
+
+And the value is low enough to say out loud: two symbols, byte-invisible, crash-path only.
+The 42 inbound references are `REALM_ASSERT_RELEASE`/`REALM_UNREACHABLE` sites that never
+fire in a passing run. Leaving it as C++ permanently is the better answer, same category as
+the exception hierarchy.
+
+### Step 8's VTT check has been dead since it was written
+
+The rule said:
+
+```
+nm -u $OBJ | grep '^VTT for'
+```
+
+**`nm -u` prints mangled names.** That grep matched demangled text against mangled output
+and returned **0 for every object ever screened**. The rule's own note — "validated across
+15 units, zero false positives" — was vacuous: it never fired once. The working form is
+`grep '^__ZTT'`.
+
+Corrected and re-run across all 67 `Storage` objects: **18 units reference a VTT**, and
+**none of them is ported**. So the dead check never produced a wrong port; every unit it
+would have flagged was parked for another reason or is still pending. It cost nothing,
+which is exactly why it survived fifteen screens.
+
+This is the same failure as the `gen_queue.py` depth column two days ago, in a different
+costume: **a check that has never been observed to fire is not a check.** Both were
+"validated" by never producing a complaint. Worth a habit — when adding a screen step,
+construct one input that makes it fire, once, before trusting it.
+
+Two refinements the corrected run makes obvious, now in the rule: an *undefined* VTT is not
+automatically a park (libc++ supplies it; what it signals is inline construction of a
+virtual-base object), and most of these VTTs are for libc++ **stream** types rather than
+realm classes.
+
+### The other five parks
+
+| unit | linked | decided by |
+|---|---|---|
+| `util/logger` | 46/46 | step 2 — 21 `ZT*`, **18 sole-definer**: the whole `Logger` hierarchy |
+| `util/file_mapper` | 15/15 | step 5 — five realm-owned throw sites in `mmap`/`munmap`/`msync` |
+| `util/fifo_helper` | 7/7 | step 5 — `create_fifo`, `try_create_fifo` |
+| `util/uri` | **6/35** | steps 1, 2 **and** 5 — dead payload, 3 sole-definer `ZT*`, seven throw sites |
+| `util/load_file` | **4/5** | steps 1 and 5 — 22 lines, and the one missing symbol is `load_file` itself |
+
+`util/load_file` is worth remembering: 22 lines, the smallest unit in the queue, and its
+single payload function is the one symbol that does not link. Fourth confirmation that a
+partial `linked` count needs the question *which side did the payload fall on*.
+
+Two notes for whoever builds the exception/RTTI shim:
+
+- **`util/logger` is a better first customer than `exceptions.cpp`** — 18 records against
+  102, and no `catch` clause anywhere depends on its base edges, so a wrong edge cannot
+  silently stop matching.
+- **`util/file_mapper` is the one to port first once throwing works.** It is on the
+  memory-mapping path, which is where `.realm` bytes actually reach disk, and the traces
+  exercise it constantly. Of everything parked on the shim it has by far the strongest
+  claim to byte-identity relevance.
+
+### Where the port now stands
+
+**41 of the 52 remaining pending units are at depth 7 — the single 51-unit strongly-
+connected component** (`alloc`, `array`, `table`, `group`, `db`, …). Outside it there are
+only a handful left: `util/file` (89 linked, 1,983 lines), `util/encrypted_file_mapping`
+(52 linked), `util/interprocess_condvar`, `util/timestamp_logger`, `backup_restore`, and
+`bson` (1 symbol linked, almost certainly dead).
+
+So the periphery is exhausted. The remaining work is three things, in rough order of
+leverage:
+
+1. Decide the exception/RTTI boundary (`migration/blocked/exceptions.md`). Six units wait
+   on it and `util/file_mapper` is the valuable one.
+2. `util/file` and `util/encrypted_file_mapping` — large, live, on the byte path, and
+   both need throwing.
+3. The core cycle, which has no include-order to follow and will have to be cut somewhere
+   the graph does not suggest.
+
+None of those is a "next unit" in the sense this loop has been consuming. That is the
+honest state, and it is a decision point rather than a queue position.

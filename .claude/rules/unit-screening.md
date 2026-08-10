@@ -177,6 +177,39 @@ call. `utilities.cpp`'s `cpuid_init()` is called from `group.cpp:47`; had it bee
 static initialiser, removing the C++ TU would have left `sse_support`/`avx_support` at
 `-1` and silently changed code paths across the library.
 
+> **Corrected 2026-08-10.** Step 8's companion VTT check was written as
+> `nm -u $OBJ | grep '^VTT for'`. **`nm -u` prints mangled names**, so that grep matched
+> demangled text against mangled output and returned 0 for every object ever screened.
+> The note that it was "validated across 15 units with zero false positives" was vacuous:
+> it never fired once. The check is `grep '^__ZTT'`, or pipe through `c++filt` first:
+>
+> ```
+> nm -u $OBJ | grep '^__ZTT'          # mangled, what nm actually emits
+> nm -u $OBJ | c++filt | grep '^VTT'  # equivalent, slower
+> ```
+>
+> Re-run corrected over all 67 `Storage` objects, **18 units reference a VTT** —
+> `chunked_binary`, `db`, `global_key`, `mixed`, `obj`, `query`, `query_engine`,
+> `query_expression`, `sort_descriptor`, `util/backtrace`, `util/bson/bson`,
+> `util/encrypted_file_mapping`, `util/interprocess_condvar`, `util/serializer`,
+> `util/terminate`, `util/to_string`, `util/uri`, `version`. **None is ported**, so the
+> dead check never produced a wrong port; every unit it would have flagged was parked for
+> some other reason or is still pending. It cost nothing this time, which is exactly why
+> it survived fifteen screens.
+>
+> Two refinements the corrected run makes obvious:
+>
+> - **An undefined VTT is not automatically a park.** It is *undefined* here, i.e. libc++
+>   or another TU supplies it; Rust does not have to synthesize it. What it signals is
+>   that the unit **constructs an object with virtual bases inline**, so the constructor
+>   was expanded into this TU and Rust would have to reproduce base-offset initialisation.
+>   Check whether an out-of-line constructor can be bound instead.
+> - **Most of these VTTs are for libc++ stream types, not realm classes.** A
+>   `VTT for std::basic_stringstream` means "this unit builds a stringstream", which drags
+>   in the whole iostream construction path — `ios_base::init`, `locale`, `use_facet`,
+>   `ctype<char>::id`, `basic_ios::~basic_ios`, the `sentry` pair, and three stream
+>   vtables. That is a much bigger surface than the symbol count suggests.
+
 **8. Class-shaped units only: expand the inline methods the unit calls on its own
 bases**, and find what those bottom out in. This is the one expensive step, and it is
 the only one that reads headers rather than the object. Run it when steps 1–7 pass and
