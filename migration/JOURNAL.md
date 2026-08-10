@@ -4566,3 +4566,94 @@ both are *data* (`Sentinel<UUID>::null_value`, `Sentinel<ObjectId>::null_value`)
 the actual code in weak instantiations other TUs supply. Porting it would define two
 constants and change nothing — `array_key` in a different disguise, and worth noticing
 before rather than after.
+
+---
+
+## Throwing from Rust is cheap; the RTTI shim was never the blocker — 2026-08-10
+
+No unit ported. `node.cpp` parked pending one decision, and the decision is not the one six
+other park files assumed.
+
+### `node.cpp` was the right next unit
+
+The strong-symbol reframing surfaced it: **8 strong sole-definer symbols**, 170 lines, zero
+`ZT*`, zero VTT, zero `throw|catch|try` in the source — and the symbols are
+`Node::create_node`, `Node::alloc`, `Node::do_copy_on_write`, `Node::calc_byte_len`,
+`Node::calc_item_count`. That is where element width, header layout and capacity growth are
+decided. It is **byte-visible and traced**: every trace allocates nodes, so the gate can
+genuinely judge it — only the second such unit after `array_unsigned`.
+
+### It inherits a throw it does not contain
+
+Three `Node::` functions own throw sites, all from `alloc.hpp:493-510`, where
+`Allocator::alloc` and `Allocator::realloc_` are **inline** and throw
+`LogicError(WrongTransactionState, ...)` on a read-only allocator. Live, not debug-gated,
+and there is **no out-of-line copy to bind** — the only allocator symbols in `librealm.a`
+are the virtual `do_alloc`/`do_realloc`. Calling `do_alloc` directly would skip the check
+and silently turn "throw on write-in-read-transaction" into "write anyway".
+
+This generalises: `Allocator::alloc` is inline, so **every unit that allocates a node
+inherits a throw site**. Of the 52 pending units, 10 have no EH at all, 8 have EH with zero
+`throw|catch|try` in their own source (inherited from inlines like this one), and 34 throw
+or catch in their own code.
+
+### The finding
+
+**`exceptions.cpp` stays C++, so nothing has to be synthesized.** `LogicError`'s typeinfo,
+vtable, constructor and destructor are all in `build/oracle/trace_runner` already and all
+are bindable. Throwing from Rust needs an allocate, a bound constructor call, and
+`__cxa_throw` — about twenty lines.
+
+`migration/checks/throw_probe/` settles it. Same Rust source, built twice:
+
+```
+  panic=abort  exit=134  thread caused non-unwinding panic. aborting.
+  panic=unwind exit=0    caught LogicError: code=1015
+                         what=Trying to modify database while in read transaction
+```
+
+C++ catches it **by reference, as `realm::LogicError`**, with the right code and message.
+
+So the wall six park files describe as "blocked on the exception/RTTI shim" is, for the
+*throwing* half, one line in `Cargo.toml`:
+
+```toml
+# Unwinding across the FFI boundary into C++ is undefined behaviour.
+panic = "abort"
+```
+
+That comment predates `extern "C-unwind"`, which exists precisely to make this defined.
+
+**What did not change:** units that **catch** are still unportable as whole units,
+independently of panic mode — Rust has no `catch`. The throw/catch split holds; only the
+throw half turns out to be cheap. `util/backtrace` and `global_key` stay parked on catching.
+
+### Why this is not the loop's decision
+
+`panic = "unwind"` cannot change `.realm` bytes and does not touch the oracle, which
+contains no Rust. But it trades away a real safety property: today an `overflow-checks`
+trap or an index panic in Rust aborts loudly at the point of failure; under `unwind` the
+same panic unwinds into C++, where a `catch (...)` up the stack can swallow it and continue
+with corrupt state. For a project whose premise is that silent corruption is the enemy,
+that is a genuine cost.
+
+A middle path is worth putting in front of the human: `panic = "unwind"` **plus** a
+`catch_unwind` barrier at every `#[no_mangle]` entry that is not deliberately throwing,
+turning a stray Rust panic back into an abort while letting deliberate C++ exceptions
+through.
+
+### What it would unblock
+
+`node` (the format core, traced), `util/file_mapper` (the memory-mapping path where
+`.realm` bytes reach disk, exercised constantly by the traces), `util/fifo_helper`,
+`util/thread`, and the throwing half of several core-cycle units. That is the difference
+between "the periphery is exhausted" and "the core is open".
+
+### Method note
+
+This is the third time in three sessions that a confidently-recorded blocker dissolved
+under a ten-minute probe — after `Allocator::translate_critical` (parked on a misread
+`weak private external`) and the step-8 VTT check (a grep that never fired). The pattern is
+identical each time: **a plausible mechanism was reasoned about rather than executed.** The
+rule already says to take a second measurement of a different kind before parking; the
+correction is that "different kind" has to mean *run it*, not *read more symbols*.
