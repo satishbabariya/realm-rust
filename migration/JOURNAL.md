@@ -4876,3 +4876,84 @@ a base-class handler. Catch-clause order in a differential is part of what it me
 `migration/in-progress/exceptions.rs` from `LogicError` to these four, port the nine
 functions, and run the gate. The traces exercise mapping constantly, so `make diff-test`
 will judge it directly rather than through a differential.
+
+---
+
+## `upstream/src/realm/util/file_mapper.cpp` — ported — 2026-08-10
+
+`make verify` **exit 0** at **rust units ported = 16**. All five traces byte-identical, 23
+corpus files agree, fault-check 5/5.
+
+Nine functions: `mmap`, `mmap_anon`, `mmap_fixed`, `munmap`, `msync`, `reserve_mapping`,
+`round_up_to_page_size`, and the two encryption barriers.
+
+### Exclusion confirmed by fingerprint
+
+`file_mapper.cpp` has two private symbols to fingerprint on — `util::get_errno_msg` and the
+destructor of the `ScopeExitFail` instantiated for `mmap`'s lambda:
+
+| | oracle | hybrid |
+|---|---|---|
+| `get_errno_msg` | 1 | **0** |
+| `ScopeExitFail<mmap::$_0>::~ScopeExitFail` | 1 | **0** |
+
+The second is a nice accident: the C++ lambda-driven RAII guard leaves a symbol, so its
+absence is direct evidence the Rust `Drop` replaced it rather than sitting alongside it.
+
+### What the gate proves, and what it does not
+
+**This is the first byte-visible-and-traced unit since `array_unsigned`, and the second
+overall.** Every trace maps, syncs and unmaps, so `diff-test` exercised `mmap`, `munmap`,
+`msync` and `round_up_to_page_size` for real — a wrong page-rounding or a wrong `munmap`
+shift would have shown up immediately rather than needing a differential.
+
+The eight **throw paths are not exercised by the gate and cannot be**: they require `mmap`
+or `msync` to fail. Their evidence is `migration/checks/throw_probe/`, which checks all
+four exception types round-trip by exact type. Coverage was not instrumented per-symbol
+this time; that is a gap, and the honest statement is "the success paths are gate-tested,
+the failure paths are probe-tested".
+
+### Three link failures, each a different flavour of "inline"
+
+The port built first time and then failed to link three times, and all three were the same
+underlying thing — a function that looks like a symbol and is not:
+
+1. **`util::make_basic_system_error_code(int)`** is `inline` in
+   `basic_system_errors.hpp:69` and forwards to `error::make_error_code(basic_system_errors)`,
+   which *is* out-of-line. Bind the callee, not the wrapper.
+2. **`_impl::SimulatedFailure::trigger_mmap(size_t)`** compiles to **nothing** here:
+   `REALM_ENABLE_SIMULATED_FAILURE` is defined only under `REALM_DEBUG`
+   (`simulated_failure.hpp:28`), which is off. Not bound — omitted, with the reason in a
+   comment. This is `array_key`'s "reachable but empty" at function granularity.
+3. The Rust module path — `src/util.rs` declares the submodules, not a `src/util/mod.rs`.
+
+Each was loud and immediate, which is the useful property: unlike `node.cpp`'s duplicate
+symbols, none of these could have shipped silently.
+
+### The `ScopeExitFail` → `Drop` translation, in place
+
+```rust
+let mut cleanup = ScopeExitFail { addr, size, armed: true };
+encrypted_file_add_mapping(...);   // Throws — the guard munmaps if it does
+cleanup.disarm();
+```
+
+This is the first use in the tree of a Rust `Drop` standing in for C++ RAII across an
+exception boundary. It works because drops run during a foreign unwind, which
+`drop_probe.rs` establishes independently.
+
+### `unique_ptr` is 8 bytes and still `sret`
+
+`std::unique_ptr<EncryptedFileMapping>` is one pointer, and a size-8 return would normally
+come back in `rax`. It has a user-provided destructor, so it is MEMORY class and returns
+through a hidden pointer. Exactly the `bind_ptr` trap from `status.cpp`, which cost an hour
+there; recognised immediately here because the rule was written down. Both
+`EncryptedFile::add_mapping` and `reserve_mapping` are affected.
+
+### Assignment to a `unique_ptr&` out-parameter is not a store
+
+`mapping = file.encryption->add_mapping(...)` and `mapping = nullptr` are both *move
+assignments*: the old target is destroyed first. Reproduced as destroy-then-overwrite
+rather than a bare pointer write, which would have leaked an `EncryptedFileMapping` on any
+remap. Nothing in the gate would have caught that — no trace remaps an encrypted file — so
+it is written down rather than discovered later.

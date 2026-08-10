@@ -95,7 +95,7 @@ static INSTALL_ABORT_ON_PANIC: extern "C" fn() = install_abort_on_panic;
 /// enforces that, so the two cannot drift.
 #[no_mangle]
 pub extern "C" fn realm_rs_units_ported() -> u32 {
-    15
+    16
 }
 
 #[cfg(test)]
