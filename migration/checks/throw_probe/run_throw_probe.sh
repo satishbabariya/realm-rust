@@ -48,5 +48,17 @@ if [ "$rc" -ne 134 ]; then
     echo "FAIL: expected SIGABRT (134) from the panic hook, got $rc." >&2; exit 1
 fi
 
+# --- third: every exception type util/file_mapper throws, caught AS ITS OWN TYPE ---
+rustc --edition 2021 -O --crate-type staticlib --target x86_64-apple-darwin -C panic=unwind \
+    "$HERE/types_probe.rs" -o "$WORK/libtypes.a" 2>/dev/null
+clang++ -std=c++20 -O2 -w -I "$ROOT/upstream/src" -I "$ROOT/build/oracle/realm-core/src" \
+    "$HERE/types_driver.cpp" "$WORK/libtypes.a" "$REALM_A" "${LIBS[@]}" -o "$WORK/types" \
+    2>&1 | grep -v '^ld: warning' || true
+"$WORK/types"; rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "FAIL: not every exception type round-tripped as its own type." >&2; exit 1
+fi
+
 echo "PASS: Rust throws propagate under panic=unwind, abort under panic=abort,"
-echo "      and a Rust panic is still fatal (SIGABRT) rather than catchable by C++."
+echo "      a Rust panic is still fatal (SIGABRT) rather than catchable by C++,"
+echo "      and all four of util/file_mapper's exception types round-trip by exact type."

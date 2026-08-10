@@ -4810,3 +4810,69 @@ from `NodeHeader` (`__si_class_type_info`, one base pointer). The risk to respec
 `dynamic_cast<Array*>` and `dynamic_cast<Cluster*>` exist elsewhere in the tree, and a
 wrong base pointer makes them return null instead of crashing — a behaviour change **no
 `.realm` byte would show**.
+
+---
+
+## The four exception types `util/file_mapper` throws all round-trip — 2026-08-10
+
+No unit ported; this is the plumbing the port needs, proven before writing any of it.
+`migration/checks/throw_probe/run_throw_probe.sh` now asserts three things and all pass.
+
+Rust can construct and throw each of the four types, and C++ catches each **as its own
+type**:
+
+```
+  AddressSpaceExhausted   ok   mmap() failed: Cannot allocate memory (size: 4096, offset: 0)
+  realm::SystemError      ok   ... : Cannot allocate memory (12)
+  std::system_error       ok   ... : Cannot allocate memory
+  std::runtime_error      ok   mmap() failed: Cannot allocate memory (size: 4096, offset: 0)
+```
+
+Every constructor is bound, not reproduced — including libc++'s
+`std::system_error(int, const error_category&, const std::string&)` and
+`std::runtime_error(const std::string&)`, which are out-of-line and therefore linkable.
+That was worth checking rather than assuming: had they been inlined, constructing them
+would have meant reproducing `__libcpp_refstring` internals.
+
+### `AddressSpaceExhausted` needs a vptr fixup, and the obvious control cannot see it
+
+Its constructor is **inline**, so there is no symbol to call. It is built by allocating,
+running the bindable `RuntimeError(ErrorCodes::AddressSpaceExhausted, msg)` base
+constructor, then overwriting the vptr with `&__ZTVN5realm21AddressSpaceExhaustedE + 16`.
+
+The first driver caught it as `const AddressSpaceExhausted&` and checked `what()` and
+`code()`. **A control that deleted the vptr fixup entirely still passed all four cases.**
+
+The reason is worth keeping: **C++ exception matching keys on the `std::type_info*` handed
+to `__cxa_throw`, not on the thrown object's vptr.** The catch clause was therefore
+insensitive to precisely the step that needed checking, and `what()`/`code()` resolved
+identically through `RuntimeError`'s vtable.
+
+`typeid` is the detector, because `typeid(e)` on a reference to a polymorphic type reads
+the **object's vptr**:
+
+```cpp
+bool right_dynamic_type = typeid(e) == typeid(realm::AddressSpaceExhausted);
+```
+
+With that line the control bites — `FAIL vptr says a different dynamic type` — and the
+typeinfo-swap control (throwing `std::runtime_error` tagged with `system_error`'s
+typeinfo) bites independently.
+
+Generalisable: **a derived-type `catch` does not test object identity; it tests the throw
+tag.** Any future construct-a-derived-exception-by-hand needs a `typeid` assertion, and
+without one the vptr could be left null and nothing here would notice.
+
+### Ordering matters in the driver too
+
+`std::system_error` derives from `std::runtime_error`. The `runtime_error` case is checked
+**after** the `system_error` case and lists `catch (const std::system_error&)` first, so a
+`runtime_error` thrown with the wrong typeinfo is reported rather than silently absorbed by
+a base-class handler. Catch-clause order in a differential is part of what it measures.
+
+### State
+
+`util/file_mapper` is unblocked with the plumbing proven. Remaining: generalise
+`migration/in-progress/exceptions.rs` from `LogicError` to these four, port the nine
+functions, and run the gate. The traces exercise mapping constantly, so `make diff-test`
+will judge it directly rather than through a differential.
