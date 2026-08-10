@@ -4657,3 +4657,68 @@ under a ten-minute probe — after `Allocator::translate_critical` (parked on a 
 identical each time: **a plausible mechanism was reasoned about rather than executed.** The
 rule already says to take a second measurement of a different kind before parking; the
 correction is that "different kind" has to mean *run it*, not *read more symbols*.
+
+---
+
+## `panic = "unwind"` with an abort-on-panic hook — 2026-08-10
+
+Infrastructure, not a unit. `make verify` **exit 0** at 15 units with the new profile, so
+every ported unit is still byte-identical under it.
+
+Decision taken by the human after the throw probe: switch `panic = "abort"` to
+`panic = "unwind"` and keep Rust bugs fatal with a barrier.
+
+### Why the barrier is a panic hook and not 125 `catch_unwind`s
+
+The obvious reading of "barrier at every entry point" is a `catch_unwind` per export. The
+crate has **128 exports** (125 functions, 3 statics). A hook is better here for three
+reasons, and the third is decisive:
+
+1. One registration cannot be forgotten; 125 wrappers can, and the next export added would
+   silently lack one.
+2. It reproduces `panic = "abort"` *exactly* — the hook runs **before** unwinding begins,
+   so the message prints and the process dies at the failure site, not one frame up.
+3. **`catch_unwind` cannot be used at a boundary that deliberately throws.** Catching a
+   foreign exception with it aborts, so the per-export form would need an exemption list
+   covering precisely the functions where exceptions are expected — the highest-risk
+   places to maintain a list by hand.
+
+Deliberate C++ exceptions are not Rust panics, so they never reach the hook.
+
+Installed through a module initialiser (`__DATA,__mod_init_func` on Apple, `.init_array`
+elsewhere), because a staticlib linked into C++ has no other entry point — `main` belongs
+to the host and nothing calls Rust before the first ported symbol runs. Verified the
+section is present in `librealm_core_rs.a`.
+
+### Both halves are checked, permanently
+
+`migration/checks/throw_probe/run_throw_probe.sh` builds the same sources under both panic
+modes and asserts the full matrix:
+
+```
+  panic=abort  exit=134  thread caused non-unwinding panic. aborting.
+  panic=unwind exit=0    caught LogicError: code=1015
+                         what=Trying to modify database while in read transaction
+  panic hook   exit=134  index out of bounds: the len is 3 but the index is 99
+```
+
+The third line is the one that matters most and it is the one that would have been easy to
+skip: a C++ driver calls a panicking Rust function **inside `try { } catch (...)`**, and
+the correct outcome is `SIGABRT` with the panic message — *not* a caught exception. The
+script fails if the panic is swallowed, and also if the exit code is anything other than
+134, so "it died for some other reason" cannot pass as success.
+
+### What this does not change
+
+- Units that **catch** remain unportable as whole units. Rust has no `catch`; panic mode is
+  irrelevant to that. `util/backtrace` and `global_key` stay parked.
+- No `.realm` byte can move. The oracle contains no Rust at all, and the change is
+  Rust-side codegen only — confirmed by `make verify` passing byte-identical on all five
+  traces and all 23 corpus files with the fault-check still catching 5/5.
+
+### Now unblocked
+
+`node.cpp` — the format core, byte-visible **and traced** — plus `util/file_mapper` (the
+memory-mapping path, exercised constantly by the traces), `util/fifo_helper`, `util/thread`,
+and the throwing half of several core-cycle units. Their park files stand as records of the
+reasoning but the throw-related ones are now stale; `node.md` should be the first revisited.

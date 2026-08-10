@@ -12,8 +12,23 @@ members = ["crates/realm-core-rs"]
 # wrap: a silently-wrapped width calculation produces a valid-looking file with the
 # wrong element width, which is the single hardest bug class here to attribute.
 overflow-checks = true
-# Unwinding across the FFI boundary into C++ is undefined behaviour.
-panic = "abort"
+# Changed from "abort" 2026-08-10, deliberately, and the old comment here said
+# "Unwinding across the FFI boundary into C++ is undefined behaviour." That was true
+# for `extern "C"` and predates `extern "C-unwind"`, which exists precisely to make it
+# defined. Every export that can be crossed by an exception is declared "C-unwind".
+#
+# Why it had to change: `Allocator::alloc` and `Allocator::realloc_` are *inline* in
+# alloc.hpp and throw LogicError on a read-only allocator, so every unit that allocates
+# a node inherits a throw site it does not contain -- including node.cpp, which is where
+# element width and header layout are decided. Under panic = "abort" the unwinder hits
+# the Rust frame and aborts. migration/checks/throw_probe/ demonstrates both halves.
+#
+# What replaces the safety it gave up: a panic hook installed at load time that aborts
+# before unwinding starts, so a Rust bug -- an overflow-checks trap, an index panic --
+# still dies loudly at the point of failure instead of unwinding into C++ where a
+# `catch (...)` could swallow it. See install_abort_on_panic in src/lib.rs. Deliberate
+# C++ exceptions are not Rust panics and are unaffected by the hook.
+panic = "unwind"
 # One object file for the whole crate, and the reason is linkage, not code size.
 #
 # The hybrid link line is:

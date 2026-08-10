@@ -30,4 +30,23 @@ for mode in abort unwind; do
         echo "UNEXPECTED: panic=unwind failed to propagate. Re-check the park files." >&2; exit 1
     fi
 done
-echo "PASS: throwing from Rust works under panic=unwind and aborts under panic=abort."
+# --- second half: a Rust panic must still be fatal under panic=unwind ---
+# The workspace gave up panic="abort" to let C++ exceptions through, and installs a panic
+# hook to keep Rust bugs loud. If this stops aborting, an overflow trap or index panic in
+# the hybrid can be swallowed by a `catch (...)` in C++ and execution continues with
+# corrupt state -- the exact failure this project exists to catch.
+rustc --edition 2021 -O --crate-type staticlib --target x86_64-apple-darwin \
+    -C panic=unwind -C overflow-checks=on "$HERE/panic_probe.rs" -o "$WORK/libpanic.a" 2>/dev/null
+clang++ -std=c++20 -O2 -w "$HERE/panic_driver.cpp" "$WORK/libpanic.a" -o "$WORK/panicprobe" \
+    2>&1 | grep -v '^ld: warning' || true
+out="$("$WORK/panicprobe" 2>&1)"; rc=$?
+printf "  panic hook   exit=%-3d %s\n" "$rc" "$(printf '%s' "$out" | tail -1)"
+if [ "$rc" -eq 0 ]; then
+    echo "FAIL: a Rust panic was not fatal -- C++ may have swallowed it." >&2; exit 1
+fi
+if [ "$rc" -ne 134 ]; then
+    echo "FAIL: expected SIGABRT (134) from the panic hook, got $rc." >&2; exit 1
+fi
+
+echo "PASS: Rust throws propagate under panic=unwind, abort under panic=abort,"
+echo "      and a Rust panic is still fatal (SIGABRT) rather than catchable by C++."
