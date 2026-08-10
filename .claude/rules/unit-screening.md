@@ -363,6 +363,32 @@ Corollary: `realm::util::Span<T, N>` with a fixed extent stores **only a pointer
 backwards shifts every subsequent argument register, and it is invisible to the type
 system on both sides.
 
+## Check a new filter against an input it must match, once
+
+Four instances in one week, three of which cost real work:
+
+| what | how it was wrong | cost |
+|---|---|---|
+| `gen_queue.py`'s `depth` | memoised a value computed under one cycle-cut, over a hash-randomised `set` | the queue's primary sort key was per-process random |
+| step 8's VTT check | `nm -u \| grep '^VTT for'` — demangled text against mangled output | returned 0 for every object ever screened; "validated across 15 units" was vacuous |
+| the realm-symbol filter | `^__ZN[A-Z]*5realm` never matches `__ZTIN5realm…` | hid 8 sole-definer RTTI records; `node.cpp` was written in full, then failed `make hybrid` with 8 duplicate symbols |
+| a `#ifdef` guard classifier | keyed on the string `WIN32`, so `#ifndef _WIN32` read as Windows-only — backwards | **none**, see below |
+
+The fourth was written while screening `util/file_mapper` and would have marked all 17 of
+its throw sites dead. It cost nothing because the rewrite carried its own check:
+
+```python
+assert live_on_darwin('#ifndef _WIN32') is True
+assert live_on_darwin('ELSE of #ifndef _WIN32') is False
+assert live_on_darwin('#ifdef _WIN32') is False
+assert live_on_darwin('ELSE of #ifdef _WIN32') is True
+```
+
+**When you write a filter, a regex or a guard classifier, feed it one input that must
+match and one that must not — before using its output for anything.** All four produced
+*plausible* output on inputs that did not exercise them, which is exactly why reading the
+code caught none of them and one assertion each would have.
+
 ## Screen the whole queue at once, not the head of it
 
 Classifying only the cheapest-to-reach units and generalising from them cost five ticks
