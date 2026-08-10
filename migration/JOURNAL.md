@@ -4722,3 +4722,91 @@ script fails if the panic is swallowed, and also if the exit code is anything ot
 memory-mapping path, exercised constantly by the traces), `util/fifo_helper`, `util/thread`,
 and the throwing half of several core-cycle units. Their park files stand as records of the
 reasoning but the throw-related ones are now stale; `node.md` should be the first revisited.
+
+---
+
+## `node.cpp` written, then reverted at the link — 2026-08-10
+
+`make verify` **exit 0 at 15 units** — the tree is back where it was. The Rust is parked in
+`migration/in-progress/node.rs`, not compiled.
+
+### It was written and working
+
+All 8 function symbols ported: `create_node`, `calc_byte_len`, `calc_item_count`, `alloc`,
+`do_copy_on_write`, `ArrayPayload::~ArrayPayload` ×3 variants. Layout by
+`-fdump-record-layouts`, five vtable slots by the Itanium pointer-to-member encoding, the
+8-byte header rules transcribed from `node_header.hpp`, and the `REALM_ASSERT_RELEASE`
+string lifted out of `node.cpp.o`'s `__cstring` so the abort message matches byte for byte.
+Two slots (`Allocator::do_translate` 48, `ArrayParent::get_child_ref` 16) matched
+`array_unsigned.rs`'s independent measurements, which is the cross-check that the
+declaration-order model holds.
+
+The throwing half worked too — `panic = "unwind"` plus the new `exceptions.rs` reproduces
+`Allocator::alloc`'s inline `LogicError(WrongTransactionState)`.
+
+### Then `make hybrid` failed with 8 duplicate symbols
+
+`node.cpp.o` is the **sole definer of 8 RTTI symbols** — vtable + typeinfo + typeinfo-name
+for `Node` and `ArrayPayload`, plus `NodeHeader`'s typeinfo pair. `Node`'s key function is
+`calc_byte_len`, so `node.cpp` is the key-function TU for both classes, and two of those
+records are referenced by other TUs. Removing it orphans them, so the linker pulled the
+member in anyway and its 8 function definitions collided with Rust's.
+
+**That is step 2 of the screen, at exactly the park threshold, and I did not run it.**
+Steps 1, 4, 5 and 8 were run; step 2 was skipped because the strong-symbol reframing from
+the previous iteration had made step 4 feel like the interesting one. The screen is an
+ordered list so that a cheap step cannot be skipped because a later one looks better.
+
+### The finding: the realm-symbol filter has been dropping all RTTI
+
+Both `evidence-and-linkage.md` and step 4 filter realm symbols with `^__ZN[A-Z]*5realm`.
+That does not match `__ZTIN5realm…`, `__ZTSN5realm…` or `__ZTVN5realm…` — after `__Z` the
+pattern demands `N` and those have `T`:
+
+```
+$ printf '__ZTIN5realm4NodeE\n__ZN5realm4Node5allocEmm\n' | grep -E '^__ZN[A-Z]*5realm'
+__ZN5realm4Node5allocEmm            <- the typeinfo silently dropped
+```
+
+So **every strong-sole-definer count published last iteration excluded RTTI.** Re-measured
+with `^__Z.*5realm`:
+
+| unit | old filter | corrected | of which RTTI |
+|---|---|---|---|
+| `node` | 8 | **14** | 6 |
+| `array_integer` | 17 | **23** | 6 |
+| `array_binary` | 19 | **22** | 3 |
+| `array_backlink` | 8 | 8 | **0** |
+| `util/file_mapper` | 9 | 9 | **0** |
+| `array_mixed` | 26 | 26 | **0** |
+| `set` | 32 | 32 | **0** |
+
+Same failure as the step-8 VTT grep two iterations ago: **a pattern never checked against
+an input it should match.** Both were "validated" by producing plausible output on inputs
+that did not exercise them. Three of these now, counting `gen_queue`'s depth column. The
+habit to build: when a filter or check is written, feed it one input that must match and
+one that must not, once, before trusting anything it says.
+
+Note `set` reads as 270 symbols under `nm -g` and is **32** strong sole-definer with no
+RTTI — the reframing survives the correction and is if anything more useful now.
+
+### Next unit: `util/file_mapper`
+
+9 strong sole-definer symbols, **zero RTTI**, and its only recorded blocker was throwing,
+which the `panic = "unwind"` switch has now solved and `throw_probe` demonstrates. It is on
+the **memory-mapping path where `.realm` bytes reach disk**, and the traces exercise it
+constantly, so `make diff-test` can judge it directly.
+
+`array_backlink` (8, no RTTI), `array_mixed` (26, no RTTI) and `set` (32, no RTTI) are the
+follow-ups. `array_integer` and `array_binary` are now known to be RTTI-gated and should be
+re-parked as such rather than left looking clean.
+
+### `node.cpp` when the RTTI shim exists
+
+It is a better first customer for that shim than `exceptions.cpp` (102 records) or
+`util/logger` (18): **three classes, eight records, trivial inheritance** — `NodeHeader`
+empty with no bases, `ArrayPayload` polymorphic with no bases, `Node` single-inheriting
+from `NodeHeader` (`__si_class_type_info`, one base pointer). The risk to respect is that
+`dynamic_cast<Array*>` and `dynamic_cast<Cluster*>` exist elsewhere in the tree, and a
+wrong base pointer makes them return null instead of crashing — a behaviour change **no
+`.realm` byte would show**.

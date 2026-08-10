@@ -39,6 +39,22 @@ Intersect with `comm -12`. (The object path had `realm-core/src/realm/` missing 
 >
 > `^__ZN[A-Z]*5realm` matches `_ZN5realm…` and the const-qualified `_ZNK5realm…`; a bare
 > `_ZN5realm` misses every `const` member function.
+>
+> **Corrected 2026-08-10. That pattern also drops every RTTI symbol.** `__ZTIN5realm…`,
+> `__ZTSN5realm…` and `__ZTVN5realm…` do not match, because after `__Z` the pattern demands
+> `N` and those have `T`:
+>
+> ```
+> $ printf '__ZTIN5realm4NodeE\n__ZN5realm4Node5allocEmm\n' | grep -E '^__ZN[A-Z]*5realm'
+> __ZN5realm4Node5allocEmm            <- the typeinfo was silently dropped
+> ```
+>
+> Use `^__Z.*5realm` — filter against libc++ by requiring `5realm`, not by symbol shape.
+> For *reachability* (this section) the difference is usually harmless, since a unit is not
+> reachable because of its typeinfo. For the **strong sole-definer count** in
+> `unit-screening.md` step 4 it is not harmless at all: it hid the eight RTTI records that
+> `node.cpp` is the sole definer of, which is what made an apparently 8-symbol unit fail
+> `make hybrid` with 8 duplicate symbols after the Rust was written and working.
 
 Measured across the near queue, the filter changes four verdicts and in both directions:
 

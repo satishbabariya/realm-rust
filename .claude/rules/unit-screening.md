@@ -131,7 +131,17 @@ see `evidence-and-linkage.md`. A short, self-contained list is a good sign in it
 >   | grep ' external ' | awk '{print $NF}' | sort -u
 > ```
 >
+> **The `^__ZN[A-Z]*5realm` filter above drops every `__ZT*` symbol** — see the correction
+> in `evidence-and-linkage.md`. Use `^__Z.*5realm`, or this step will under-count the
+> obligation by exactly the RTTI records, which is the difference between a unit that links
+> and one that fails with duplicate symbols after the Rust is written.
+>
 > then confirm each is sole-definer against `librealm.a`, exactly as step 2 does for `ZT*`.
+> **Step 2 is not optional when step 4 looks good.** `node.cpp` passed steps 1, 4, 5 and 8
+> and was written in full before `make hybrid` reported 8 duplicate symbols: it is the
+> key-function TU for `Node` and `ArrayPayload`, sole definer of 8 RTTI records. The screen
+> is an ordered list so that a cheap step cannot be skipped because a later one looked more
+> interesting.
 > `array_backlink` is 8 strong symbols of which all 8 are sole-definer, and its 12 weak
 > exports all have >1 definer — so the obligation is 8, not 42.
 >
