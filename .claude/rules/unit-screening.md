@@ -176,6 +176,14 @@ Only the third is a park. `util/backtrace` is genuinely in it — `materialize_m
 `noexcept` around `try { … } catch (...) { return msg; }`, which *consumes* the exception.
 `global_key`'s `operator>>` likewise converts the exception into a stream failure state.
 
+**Apply the split per function, not per unit.** `util/fifo_helper` has `create_fifo`,
+which throws and would be portable, and `try_create_fifo`, which is
+`try { create_fifo(path); return true; } catch (...) { return false; }` and is not. They
+share a translation unit, so the unit is unportable. Its park file claimed for a day that
+it "only throws and never catches" — the screen had counted 4 `throw|catch|try` hits,
+confirmed two were `realm::`-owned throws, and never asked what the other two were.
+**A count is not a classification.**
+
 Note that a source `grep` for `catch` finds neither RAII guards nor the distinction above:
 `ScopeExitFail` is a cleanup in a template's clothing and contains no `catch` token. Read
 the exception-path behaviour, do not count keywords.
